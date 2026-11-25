@@ -2521,6 +2521,10 @@ struct Batch {
     /// bounded diagnostics line. No range contents or view attribution.
     #[cfg(feature = "diagnostics")]
     summary: crate::ranges::RefreshSummary,
+    /// Where each copy in `current` sits in memory, by copy: a title copy
+    /// reaches by its bytes only the copies that can hold them, not
+    /// every copy flushed.
+    extents: victory_formats::extents::Extents,
 }
 
 /// How far apart a copy's pending ranges may be and still be done as one,
@@ -2561,6 +2565,7 @@ impl Batch {
     fn title_written(&mut self) {
         self.flush();
         self.current.clear();
+        self.extents.clear();
     }
 
     /// As [`Batch::title_written`], before a copy into the title memory
@@ -2578,8 +2583,13 @@ impl Batch {
         }
         self.flush();
         let (from, to) = touched(at, at.saturating_add(len));
-        for (_, have) in self.current.values_mut() {
-            have.remove(from, to);
+        // Only the copies whose memory the bytes can be in: the rest
+        // hold nothing of the window, and what a no-op remove would
+        // leave whole it leaves whole.
+        for key in self.extents.overlapping(from, to) {
+            if let Some((_, have)) = self.current.get_mut(&key) {
+                have.remove(from, to);
+            }
         }
     }
 
@@ -2606,11 +2616,18 @@ impl Batch {
                 PREPARING[1].fetch_add(copied as u64, Ordering::Relaxed);
                 total += copied;
                 let (from, to) = taken(from, to, (start as usize, (start + len) as usize));
-                self.current
-                    .entry(key)
-                    .or_insert_with(|| (shadow.clone(), Default::default()))
-                    .1
-                    .insert(from, to, 0);
+                // The copy's memory joins the index as its first range
+                // joins `current`: a later title copy reaches it by its
+                // bytes.
+                let (_, have) = match self.current.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(vacant) => {
+                        self.extents
+                            .flushed(key, start as usize, (start + len) as usize);
+                        vacant.insert((shadow.clone(), Default::default()))
+                    }
+                    std::collections::hash_map::Entry::Occupied(occupied) => occupied.into_mut(),
+                };
+                have.insert(from, to, 0);
             }
         }
         total
