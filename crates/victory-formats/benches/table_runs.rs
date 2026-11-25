@@ -27,7 +27,7 @@ impl Lcg {
 /// ring buffers (64–128 KiB), until `count`.
 fn copies(count: usize, regions: u64, lcg: &mut Lcg) -> Vec<(u64, u64)> {
     let mut copies = Vec::with_capacity(count);
-    let mut place = |lcg: &mut Lcg, len: u64| {
+    let place = |lcg: &mut Lcg, len: u64| {
         let region = lcg.next() % regions;
         let pages = len.div_ceil(1 << 16);
         let start = (region << 28) + ((lcg.next() % (4096 - pages.min(4096))) << 16);
@@ -81,12 +81,11 @@ fn main() {
         ("rebuild", copies(4_100, 40, &mut lcg), 40u64),
         ("capacity", stress(&mut lcg), 600u64),
     ] {
-        let pairs: Vec<u32> = (0..world.len() as u32).map(|k| 1 << 18 | 2 * k).collect();
+        let pairs: Vec<u32> = (0..world.len() as u32).map(|k| (1 << 18) | (2 * k)).collect();
         let mut warm = Scratch::default();
         let mut out = Outputs::default();
         let built = warm.build(&world, &pairs, 0, &mut out);
         let (bytes, blocks) = (built.dwords.len() * 4, built.blocks.len());
-        drop(built);
         assert!(blocks <= CAPACITY + 1, "the table fits its buffer");
         println!("bench_table_{label}_bytes {bytes} blocks {blocks}");
         let mut run = |fresh: bool| -> Vec<f64> {

@@ -131,6 +131,5 @@ pub fn table(
     let mut scratch = Scratch::default();
     let built = scratch.build(copies, pairs, null, &mut out);
     let dwords = built.dwords.to_vec();
-    drop(built);
     (dwords, out.blocks, out.owners)
 }

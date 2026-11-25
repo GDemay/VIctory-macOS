@@ -344,7 +344,6 @@ impl Shared {
             ONCE.call_once(|| tracing::warn!(CAPACITY, "title memory copies in more 256 MiB regions than a page table has room for: the rest read as missing"));
         }
         self.generation = now;
-        drop(built);
         self.layout = Arc::new(Layout {
             bits: named.iter().map(|c| c.dirty_bit()).collect(),
             copies: named,
@@ -962,6 +961,8 @@ void main() {
         // SAFETY: our pools (a guarded page faults into the handler).
         let fill = |p: usize, base: u32| {
             for k in 0..4 {
+                // SAFETY: p points into our pools, which guard their
+                // pages; a faulting page goes to the guard's handler.
                 unsafe { (p as *mut u32).add(k).write_volatile(base + k as u32) };
             }
         };
