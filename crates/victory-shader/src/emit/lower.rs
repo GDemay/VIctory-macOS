@@ -498,6 +498,20 @@ fn unsupported(offset: usize, what: Why) -> Stop {
     Stop::Fail(ShaderError::Unsupported { offset, what })
 }
 
+/// DXIL semantic index and interpolation mode for one GFX10 barycentric
+/// pair. Pull-model values are I/W, J/W and 1/W, not this semantic's weights.
+fn barycentric_signature(kind: Barycentric) -> Option<(u32, u8)> {
+    Some(match kind {
+        Barycentric::PerspectiveSample => (0, 6),
+        Barycentric::PerspectiveCenter => (0, 2),
+        Barycentric::PerspectiveCentroid => (0, 3),
+        Barycentric::PerspectivePullModel => return None,
+        Barycentric::LinearSample => (1, 7),
+        Barycentric::LinearCenter => (1, 4),
+        Barycentric::LinearCentroid => (1, 5),
+    })
+}
+
 /// The scalar instruction defining an SSA value in this block and its operands.
 fn scalar_def<'a, const N: usize>(
     block: &'a Block,
@@ -1503,6 +1517,54 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    fn barycentric_input(&mut self, kind: Barycentric, index: u8) -> Val {
+        // GFX10 supplies I and J, which weight P10 and P20 in
+        // P0 + P10 * I + P20 * J. DirectX orders SV_Barycentrics by the
+        // provoking vertex, then the other two vertices, so I/J are y/z.
+        // Pull-model registers instead contain I/W, J/W and 1/W and need a
+        // separate conversion.
+        let Some((semantic_index, interp)) = barycentric_signature(kind) else {
+            return Val::Missing("barycentrics read directly");
+        };
+        let col = match index {
+            0 => 1,
+            1 => 2,
+            _ => return Val::Missing("barycentrics read directly"),
+        };
+        let id = match self
+            .s
+            .inputs
+            .iter()
+            .position(|e| e.kind == 28 && e.index == semantic_index)
+        {
+            Some(id) if self.s.inputs[id].usage == 0 => {
+                self.s.inputs[id].interp = interp;
+                id
+            }
+            Some(id) if self.s.inputs[id].interp == interp => id,
+            // DXIL allows one perspective and one affine barycentric input.
+            // It cannot represent two sampling locations for either one.
+            Some(_) => return Val::Missing("barycentrics read directly"),
+            None => {
+                self.s.inputs.push(SigElement {
+                    name: "SV_Barycentrics".into(),
+                    index: semantic_index,
+                    kind: 28,
+                    comp: 9,
+                    interp,
+                    row: None,
+                    col: 0,
+                    cols: 3,
+                    usage: 0,
+                    half: false,
+                });
+                self.s.inputs.len() - 1
+            }
+        };
+        self.s.flags |= flags::BARYCENTRICS;
+        self.load_input(id, col)
+    }
+
     fn input(&mut self, input: Input) -> Val {
         let (kind, col) = match input {
             Input::VertexId => (1, 0),
@@ -1514,7 +1576,7 @@ impl<'a> Lower<'a> {
                     None => Val::Missing("a vertex input the signature lacks"),
                 };
             }
-            Input::Barycentric { .. } => return Val::Missing("barycentrics read directly"),
+            Input::Barycentric { kind, index } => return self.barycentric_input(kind, index),
             Input::PrimitiveId => return Val::Missing("the primitive id"),
             // The console code tests it against 0 (`v_cmp_ne_u32`), as the
             // host's value can be.
@@ -10925,13 +10987,29 @@ pub(crate) fn split_wave_barriers(p: &Program) -> Option<Set<(usize, usize)>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Lowered, Numeric, Parts, buffer_format, half_shift, lower, packed_half};
+    use super::{
+        Lowered, Numeric, Parts, barycentric_signature, buffer_format, half_shift, lower,
+        packed_half,
+    };
     use crate::native::{
         ComputeIo, HwStage, NativeProgram, ResourceType, RootParam, RootType, StageIo, UsedResource,
     };
     use crate::{io, ir, resource, structure};
 
     const S_ENDPGM: u32 = 0xBF81_0000;
+
+    #[test]
+    fn direct_barycentric_modes_match_dxil_semantics() {
+        use crate::io::Barycentric::*;
+
+        assert_eq!(barycentric_signature(PerspectiveSample), Some((0, 6)));
+        assert_eq!(barycentric_signature(PerspectiveCenter), Some((0, 2)));
+        assert_eq!(barycentric_signature(PerspectiveCentroid), Some((0, 3)));
+        assert_eq!(barycentric_signature(LinearSample), Some((1, 7)));
+        assert_eq!(barycentric_signature(LinearCenter), Some((1, 4)));
+        assert_eq!(barycentric_signature(LinearCentroid), Some((1, 5)));
+        assert_eq!(barycentric_signature(PerspectivePullModel), None);
+    }
 
     /// Whether a synthetic compute program translates with these input registers.
     fn lowers(words: &[u32], rsrc2: u32) -> Result<(), crate::ShaderError> {
