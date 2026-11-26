@@ -738,7 +738,7 @@ unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
 }
 
 #[cfg(test)]
-mod tests {
+mod alloc_tests {
     use super::{BIG, C, COUNT, CountingAlloc, Relaxed};
     use std::alloc::{GlobalAlloc, Layout};
 
