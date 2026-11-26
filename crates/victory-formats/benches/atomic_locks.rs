@@ -1,13 +1,15 @@
 //! Time the emulated 64-bit image atomic's two forms as the wave's own
 //! instruction stream, on CPU: the turn loop `locked_atomic64` emits
-//! today, and the round form announced on issue #240. The lock words
-//! (`ATOMIC_LOCKS` of them, hashed from the coordinates), the spin's
-//! compare-exchange and the fenced read-modify-write are the emitted
-//! ones (victory-shader `lower.rs`, "Atomic locks"); what the title
-//! uses them for is one operation, per #240's disassembly of its
-//! shaders: an unsigned maximum of 64-bit keys into R32G32_UINT
-//! texels, all in alpha pre-pass pixel shaders, all lanes of a wave
-//! per instruction.
+//! today, and the rounds-then-turns form PR #257 lands (the round form
+//! announced on issue #240, as it landed: four capped rounds of one
+//! attempt per lane not done, then today's turns for whoever is
+//! left). The lock words (`ATOMIC_LOCKS` of them, hashed from the
+//! coordinates), the spin's compare-exchange and the fenced
+//! read-modify-write are the emitted ones (victory-shader `lower.rs`,
+//! "Atomic locks"); what the title uses them for is one operation, per
+//! #240's disassembly of its shaders: an unsigned maximum of 64-bit
+//! keys into R32G32_UINT texels, all in alpha pre-pass pixel shaders,
+//! all lanes of a wave per instruction.
 //!
 //! Four shapes: the three the runtime's own test writes
 //! (`image_atomics_of_64_bits`, "as the alpha prepasses use them") —
@@ -43,6 +45,8 @@ use std::time::Instant;
 const LANES: usize = 32;
 /// Lock words, as `emit` sizes them: `ATOMIC_LOCKS` dwords.
 const LOCKS: usize = 1 << 16;
+/// The rounds PR #257 tries before the turns: `ATOMIC_LOCK_ROUNDS`.
+const ROUNDS: usize = 4;
 /// The texture, 64 by 4 R32G32_UINT texels.
 const TEXELS: usize = 64 * 4;
 /// Wave visits of one program a sample times.
@@ -161,13 +165,14 @@ fn turn(m: &Memory, lanes: &mut [Lane], count: &mut Count) {
     }
 }
 
-/// The form announced on issue #240: each round, every lane that has
-/// not finished makes one attempt at its lock word and the winners
-/// read-modify-write in that same round — one fenced region for all of
-/// them, two barriers, not two per lane. The worst case stays the turn
-/// form's rounds, one per lane of the busiest word, and pays besides
-/// the attempts of every lane that did not win; a wave whose lanes
-/// have distinct locks finishes in its first round.
+/// The rounds PR #257 lands before the turns: per round, every lane
+/// that has not finished makes one attempt at its lock word and the
+/// winners read-modify-write in that same round — one fenced region,
+/// two barriers, not two per lane. Nobody spins in a round, and the
+/// four rounds run even when every lane is done (no all-done exit
+/// without a wave operation). A lane the rounds leave takes today's
+/// turn, one uncontended attempt; a wave whose lanes have distinct
+/// locks finishes in the first round and skips the turns.
 fn round(m: &Memory, lanes: &mut [Lane], count: &mut Count) {
     let mut words = [0usize; LANES];
     for (i, lane) in lanes.iter().enumerate() {
@@ -178,7 +183,9 @@ fn round(m: &Memory, lanes: &mut [Lane], count: &mut Count) {
     let mut rest: [usize; LANES] = core::array::from_fn(|i| i);
     let mut rest_n = lanes.len();
     let mut won: [usize; LANES] = [0; LANES];
-    while rest_n > 0 {
+    let mut done = [false; LANES];
+    for _ in 0..ROUNDS {
+        count.rounds += 1;
         // Every lane not done attempts once, in lane order.
         let mut won_n = 0;
         let mut still: [usize; LANES] = [0; LANES];
@@ -198,7 +205,9 @@ fn round(m: &Memory, lanes: &mut [Lane], count: &mut Count) {
         }
         rest = still;
         rest_n = still_n;
-        count.rounds += 1;
+        if won_n == 0 {
+            continue;
+        }
         // The winners' read-modify-write, one region.
         fence(Ordering::SeqCst);
         count.barriers += 1;
@@ -210,9 +219,40 @@ fn round(m: &Memory, lanes: &mut [Lane], count: &mut Count) {
         }
         fence(Ordering::SeqCst);
         count.barriers += 1;
-        // The winners free their words and leave the loop.
+        // The winners free their words and leave.
         for &i in &won[..won_n] {
             m.locks[words[i]].fetch_and(0, Ordering::Relaxed);
+            done[i] = true;
+        }
+    }
+    // Today's turns for whoever the rounds left; the pass runs whole,
+    // its finished lanes passing through the head and the latch.
+    if rest_n > 0 {
+        for i in 0..lanes.len() {
+            count.rounds += 1;
+            if done[i] {
+                continue;
+            }
+            // Spin: one compare-exchange, which an uncontended word
+            // takes.
+            let word = &m.locks[words[i]];
+            let won = word
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok();
+            count.attempts += 1;
+            // Held: fence, read, write, fence.
+            fence(Ordering::SeqCst);
+            count.barriers += 1;
+            let at = texel_of(lanes[i].x, lanes[i].y);
+            let old = m.texels[at].load(Ordering::Relaxed);
+            m.texels[at].store(old.max(lanes[i].value), Ordering::Relaxed);
+            lanes[i].old = old;
+            fence(Ordering::SeqCst);
+            count.barriers += 1;
+            // Frees it only if taken: an `and` with all ones changes
+            // nothing.
+            let keep = if won { 0 } else { u32::MAX };
+            word.fetch_and(keep, Ordering::Relaxed);
         }
     }
 }
