@@ -81,7 +81,9 @@ fn main() {
         ("rebuild", copies(4_100, 40, &mut lcg), 40u64),
         ("capacity", stress(&mut lcg), 600u64),
     ] {
-        let pairs: Vec<u32> = (0..world.len() as u32).map(|k| (1 << 18) | (2 * k)).collect();
+        let pairs: Vec<u32> = (0..world.len() as u32)
+            .map(|k| (1 << 18) | (2 * k))
+            .collect();
         let mut warm = Scratch::default();
         let mut out = Outputs::default();
         let built = warm.build(&world, &pairs, 0, &mut out);

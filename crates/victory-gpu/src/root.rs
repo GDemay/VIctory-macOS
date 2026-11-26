@@ -571,7 +571,10 @@ mod tests {
         // SAFETY: ntdll is always loaded; both names end with a NUL.
         let wine = unsafe {
             use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-            GetProcAddress(GetModuleHandleA(c"ntdll.dll".as_ptr().cast()), c"wine_get_version".as_ptr().cast())
+            GetProcAddress(
+                GetModuleHandleA(c"ntdll.dll".as_ptr().cast()),
+                c"wine_get_version".as_ptr().cast(),
+            )
         }
         .is_some();
         if wine {

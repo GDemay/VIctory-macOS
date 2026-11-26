@@ -18,10 +18,10 @@
 
 #[cfg(windows)]
 mod bindless;
-#[cfg(all(windows, feature = "diagnostics"))]
-mod capture;
 #[cfg(any(windows, test))]
 mod caption;
+#[cfg(all(windows, feature = "diagnostics"))]
+mod capture;
 #[cfg(windows)]
 mod composite;
 #[cfg(windows)]

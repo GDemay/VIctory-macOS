@@ -375,7 +375,9 @@ fn starts_in(thread: windows_sys::Win32::Foundation::HANDLE, module: &std::ffi::
 pub(crate) fn title_image_base(address: usize) -> Option<usize> {
     images().iter().find_map(|m| {
         let base = m.image.base();
-        (base..base + m.image.info().size_of_image as usize).contains(&address).then_some(base)
+        (base..base + m.image.info().size_of_image as usize)
+            .contains(&address)
+            .then_some(base)
     })
 }
 

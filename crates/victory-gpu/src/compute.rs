@@ -110,7 +110,10 @@ pub(crate) fn pipeline(
     Ok((root, pso))
 }
 
-pub(crate) fn root_signature(device: &ID3D12Device, params: &[Param]) -> Result<ID3D12RootSignature> {
+pub(crate) fn root_signature(
+    device: &ID3D12Device,
+    params: &[Param],
+) -> Result<ID3D12RootSignature> {
     let ranges: Vec<Vec<D3D12_DESCRIPTOR_RANGE1>> = params
         .iter()
         .map(|p| match p {

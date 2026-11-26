@@ -88,9 +88,19 @@ fn modules(file: &std::fs::File) {
     // SAFETY: `snapshot` is open; `entry` is sized.
     let mut more = unsafe { Module32FirstW(snapshot, &mut entry) } != 0;
     while more {
-        let len = entry.szModule.iter().position(|&c| c == 0).unwrap_or(entry.szModule.len());
+        let len = entry
+            .szModule
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(entry.szModule.len());
         let name = String::from_utf16_lossy(&entry.szModule[..len]);
-        line(file, format_args!("module {name} base {:#x} size {:#x}", entry.modBaseAddr as usize, entry.modBaseSize));
+        line(
+            file,
+            format_args!(
+                "module {name} base {:#x} size {:#x}",
+                entry.modBaseAddr as usize, entry.modBaseSize
+            ),
+        );
         // SAFETY: as above.
         more = unsafe { Module32NextW(snapshot, &mut entry) } != 0;
     }
@@ -101,10 +111,17 @@ fn modules(file: &std::fs::File) {
 /// [`dump_stacks`] into `file`, with a line before each step, so a dump
 /// that stops shows where.
 fn dump_raw(file: &std::fs::File, at: u64, ids: &mut Vec<u32>) {
-    line(file, format_args!("dump at {at} s: taking a thread snapshot"));
+    line(
+        file,
+        format_args!("dump at {at} s: taking a thread snapshot"),
+    );
     // SAFETY: plain queries and a snapshot of this process's threads.
     let (me, process, snapshot) = unsafe {
-        (GetCurrentThreadId(), GetCurrentProcessId(), CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0))
+        (
+            GetCurrentThreadId(),
+            GetCurrentProcessId(),
+            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0),
+        )
     };
     if snapshot == INVALID_HANDLE_VALUE {
         line(file, format_args!("dump at {at} s: no snapshot"));
@@ -130,14 +147,27 @@ fn dump_raw(file: &std::fs::File, at: u64, ids: &mut Vec<u32>) {
         line(file, format_args!("  thread {id}: opening"));
         // SAFETY: opens a thread of our own process.
         let thread = unsafe {
-            OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, 0, id)
+            OpenThread(
+                THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                0,
+                id,
+            )
         };
         if thread.is_null() {
             continue;
         }
-        line(file, format_args!("  thread {id} start {:#x}", start_of(thread)));
+        line(
+            file,
+            format_args!("  thread {id} start {:#x}", start_of(thread)),
+        );
         let (frames, (priority, base)) = frames_of(thread);
-        line(file, format_args!("  thread {id} priority {priority} (base {base}), {} frames", frames.len()));
+        line(
+            file,
+            format_args!(
+                "  thread {id} priority {priority} (base {base}), {} frames",
+                frames.len()
+            ),
+        );
         for (i, pc) in frames.into_iter().enumerate() {
             line(file, format_args!("    #{i:<2} {pc:#x}"));
         }
