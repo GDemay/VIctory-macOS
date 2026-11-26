@@ -172,11 +172,7 @@ pub fn track(
                 let (param, dword) = t.param_of(reg)?;
                 Some((v, param, dword))
             })
-            .chain(
-                t.spilled
-                    .iter()
-                    .map(|(&v, &(param, dword))| (v, param, dword)),
-            )
+            .chain(t.spilled.iter().map(|(&v, &(param, dword))| (v, param, dword)))
             .collect(),
         ..Resources::default()
     };
@@ -1202,18 +1198,10 @@ impl<'a> Tracer<'a> {
         let args = match taken.iter().position(|&t| t) {
             Some(first) if taken.contains(&false) => edge(first, joins, known).and_then(|live| {
                 (0..preds.len())
-                    .map(|j| {
-                        if taken[j] {
-                            edge(j, joins, known)
-                        } else {
-                            Ok(live.clone())
-                        }
-                    })
+                    .map(|j| if taken[j] { edge(j, joins, known) } else { Ok(live.clone()) })
                     .collect::<Result<_, _>>()
             }),
-            _ => (0..preds.len())
-                .map(|j| edge(j, joins, known))
-                .collect::<Result<_, _>>(),
+            _ => (0..preds.len()).map(|j| edge(j, joins, known)).collect::<Result<_, _>>(),
         };
         joins.pop();
         Ok(Some(Source::Phi { block, args: args? }))

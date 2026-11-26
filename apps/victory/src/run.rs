@@ -71,10 +71,7 @@ pub fn run(
     }
     // Rosetta cannot resume these when they fault partway (#14, #50).
     let masked = victory_loader::masked::masked_stores(&prepared.info, &original);
-    println!(
-        "masked stores  {}",
-        victory_loader::masked::summary(&masked)
-    );
+    println!("masked stores  {}", victory_loader::masked::summary(&masked));
     // The file's bytes (the exe's size, 114 MB) are kept only to patch the
     // masked stores after the mapping.
     let patching = std::env::var("VICTORY_PATCH_MASKED").ok();

@@ -292,9 +292,7 @@ impl Layout {
             && d.samples.is_power_of_two()
             && d.samples <= 8
             && (d.samples == 1
-                || (d.dimension == Dimension::Tex2d
-                    && d.mips == 1
-                    && d.swizzle != Swizzle::LINEAR))
+                || (d.dimension == Dimension::Tex2d && d.mips == 1 && d.swizzle != Swizzle::LINEAR))
             && (d.dimension != Dimension::Tex1d || d.height == 1)
             && (d.dimension != Dimension::Tex3d
                 || matches!(d.swizzle.0, 0 | 5 | 9 | 17 | 21 | 24..=27));

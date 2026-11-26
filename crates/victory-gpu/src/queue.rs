@@ -195,17 +195,11 @@ fn pump(held: &mut Holding, why: Why) {
     if held.is_empty() {
         return;
     }
-    let Some(host) = crate::host::host() else {
-        return;
-    };
+    let Some(host) = crate::host::host() else { return };
     let read = read_value;
     for (queue, waits) in held.force_older_than(VALVE) {
         account().forced += 1;
-        tracing::warn!(
-            queue = kind(queue),
-            ?waits,
-            "held work runs without its waits after {VALVE:?} (safety valve)"
-        );
+        tracing::warn!(queue = kind(queue), ?waits, "held work runs without its waits after {VALVE:?} (safety valve)");
     }
     let fence = |f: usize| crate::fence::value(f as This);
     let started = std::time::Instant::now();
@@ -245,14 +239,10 @@ fn pump(held: &mut Holding, why: Why) {
     }
     static TIMER: std::sync::Once = std::sync::Once::new();
     TIMER.call_once(|| {
-        let _ = std::thread::Builder::new()
-            .name("victory held work".into())
-            .spawn(|| {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                    pump_held_if_free(Why::Timer);
-                }
-            });
+        let _ = std::thread::Builder::new().name("victory held work".into()).spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            pump_held_if_free(Why::Timer);
+        });
     });
 }
 
@@ -260,11 +250,7 @@ fn pump(held: &mut Holding, why: Why) {
 #[cfg(windows)]
 fn read_value(address: u64, bytes: u8) -> Option<u64> {
     let mut value = [0u8; 8];
-    crate::host::read_into(
-        address as *const u8,
-        &mut value[..usize::from(bytes.min(8))],
-    )
-    .then(|| u64::from_le_bytes(value))
+    crate::host::read_into(address as *const u8, &mut value[..usize::from(bytes.min(8))]).then(|| u64::from_le_bytes(value))
 }
 
 /// A queue's type, for logs (0 graphics, 2 compute, 3 copy). Titles do not
@@ -293,10 +279,7 @@ struct Account {
 #[cfg(windows)]
 fn account() -> std::sync::MutexGuard<'static, Account> {
     static ACCOUNT: std::sync::OnceLock<std::sync::Mutex<Account>> = std::sync::OnceLock::new();
-    ACCOUNT
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    ACCOUNT.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The frame line of held work: what waited, how long and what released it,
@@ -307,12 +290,7 @@ fn account_frame(frame: u64) {
     let (fence_waits, fence_waited) = crate::fence::take_waited();
     let a = std::mem::take(&mut *account());
     let blocked = held().blocked(&read_value);
-    if a.released.is_empty()
-        && blocked.is_empty()
-        && a.forced == 0
-        && a.unknown == 0
-        && a.mappings == 0
-    {
+    if a.released.is_empty() && blocked.is_empty() && a.forced == 0 && a.unknown == 0 && a.mappings == 0 {
         return;
     }
     let longest = a.released.iter().map(|r| r.1).max().unwrap_or_default();
@@ -340,43 +318,18 @@ fn account_frame(frame: u64) {
     tracing::debug!(
         frame,
         "held work released this frame (queue type, ms, by): {:?}",
-        a.released
-            .iter()
-            .map(|(k, d, w)| (k, d.as_secs_f64() * 1e3, w))
-            .collect::<Vec<_>>()
+        a.released.iter().map(|(k, d, w)| (k, d.as_secs_f64() * 1e3, w)).collect::<Vec<_>>()
     );
     for (queue, items, waited, unmet) in &blocked {
         let level_warn = blocked.len() > 1;
         let unmet: Vec<String> = unmet
             .iter()
-            .map(|w| {
-                format!(
-                    "{:#x} cmp {} {:#x} (is {:?})",
-                    w.address,
-                    w.comparison,
-                    w.reference,
-                    read_value(w.address, w.bytes)
-                )
-            })
+            .map(|w| format!("{:#x} cmp {} {:#x} (is {:?})", w.address, w.comparison, w.reference, read_value(w.address, w.bytes)))
             .collect();
         if level_warn {
-            tracing::warn!(
-                frame,
-                queue = kind(*queue),
-                items,
-                waited_ms = waited.as_millis(),
-                ?unmet,
-                "two or more queues hold work at the present"
-            );
+            tracing::warn!(frame, queue = kind(*queue), items, waited_ms = waited.as_millis(), ?unmet, "two or more queues hold work at the present");
         } else {
-            tracing::info!(
-                frame,
-                queue = kind(*queue),
-                items,
-                waited_ms = waited.as_millis(),
-                ?unmet,
-                "a queue holds work at the present"
-            );
+            tracing::info!(frame, queue = kind(*queue), items, waited_ms = waited.as_millis(), ?unmet, "a queue holds work at the present");
         }
     }
     if a.forced > 0 || a.unknown > 0 || a.mappings > 0 {
@@ -617,21 +570,16 @@ fn log_planes(frame: u64, planes: u32, found: &[Vec<This>], shown: usize) {
 fn shown_plane(found: &[Vec<This>]) -> usize {
     static PLANE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
     let want = *PLANE.get_or_init(|| {
-        std::env::var("VICTORY_PRESENT_PLANE")
-            .ok()
-            .and_then(|v| v.parse().ok())
+        std::env::var("VICTORY_PRESENT_PLANE").ok().and_then(|v| v.parse().ok())
     });
     let areas: Vec<u64> = found
         .iter()
         .map(|plane| {
-            plane
-                .first()
-                .and_then(|&r| crate::resource::host_resource(r))
-                .map_or(0, |t| {
-                    // SAFETY: a live resource.
-                    let d = unsafe { t.GetDesc() };
-                    d.Width * u64::from(d.Height)
-                })
+            plane.first().and_then(|&r| crate::resource::host_resource(r)).map_or(0, |t| {
+                // SAFETY: a live resource.
+                let d = unsafe { t.GetDesc() };
+                d.Width * u64::from(d.Height)
+            })
         })
         .collect();
     pick_plane(want, &areas)
@@ -732,8 +680,7 @@ extern "system" fn present(
             .filter(|&o| o != resource && crate::composite::wanted())
             .and_then(|o| Some((o, crate::resource::host_resource(o)?)));
         let overlay_state = other.as_ref().map(|(o, _)| {
-            crate::resource::host_transition(*o, COPY_SOURCE)
-                .map_or(COPY_SOURCE, |(_, before)| before)
+            crate::resource::host_transition(*o, COPY_SOURCE).map_or(COPY_SOURCE, |(_, before)| before)
         });
         let overlay = other.as_ref().zip(overlay_state).map(|((_, t), s)| (t, s));
         let shown = host.present(&texture, state, overlay, frame);
@@ -957,22 +904,9 @@ mod tests {
             // SAFETY: a non-zero size; leaked, as title memory outlives a test.
             let address = unsafe { std::alloc::alloc_zeroed(layout) } as u64;
             let words: [u32; 14] = [3, 0, 0, 0, 64, 0, 64, 1 | 1 << 16, 28, 1, 0, 0x105, 0, 0];
-            let iid = guid(
-                0x696442be,
-                0xa72e,
-                0x4059,
-                [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad],
-            );
+            let iid = guid(0x696442be, 0xa72e, 0x4059, [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad]);
             let mut out = std::ptr::null();
-            let made = crate::resource::create_at_address(
-                std::ptr::null(),
-                address,
-                words.as_ptr().cast(),
-                0,
-                std::ptr::null(),
-                &iid,
-                &mut out,
-            );
+            let made = crate::resource::create_at_address(std::ptr::null(), address, words.as_ptr().cast(), 0, std::ptr::null(), &iid, &mut out);
             assert_eq!(made, S_OK);
             out
         };

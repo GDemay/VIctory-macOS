@@ -262,10 +262,7 @@ fn tag(blob: &[u8]) -> String {
 /// The pre-build's list as saved: the tag it holds for, then its keys.
 fn list(tag: &str, keys: &HashSet<String>) -> String {
     let keys = keys.iter().map(String::as_str);
-    std::iter::once(tag)
-        .chain(keys)
-        .collect::<Vec<_>>()
-        .join("\n")
+    std::iter::once(tag).chain(keys).collect::<Vec<_>>().join("\n")
 }
 
 /// The keys of a saved list, if it holds for `tag` (else none).
@@ -280,12 +277,7 @@ fn listed(list: &[u8], tag: &str) -> HashSet<String> {
 
 /// Whether the pre-build has the title pipeline `key` in the library.
 pub(crate) fn prebuilt(key: &str) -> bool {
-    library().is_some_and(|l| {
-        l.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .prebuilt
-            .contains(key)
-    })
+    library().is_some_and(|l| l.lock().unwrap_or_else(|e| e.into_inner()).prebuilt.contains(key))
 }
 
 /// The pre-build has the title pipeline `key` in the library now.
@@ -416,12 +408,7 @@ pub(crate) fn save(now: bool) {
             }
         }
     };
-    let used = USED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .map(Used::list)
-        .unwrap_or_default();
+    let used = USED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(Used::list).unwrap_or_default();
     let written = crate::make_dir(dir)
         .and_then(|()| match &blob {
             Some(blob) => write_atomically(&dir.join(LIBRARY_FILE), &[&mark(blob), blob]),
@@ -483,10 +470,7 @@ static CREATED: Mutex<(u64, Option<HashSet<String>>)> = Mutex::new((0, None));
 pub(crate) fn note_created(key: &str) {
     let mut created = CREATED.lock().unwrap_or_else(|e| e.into_inner());
     created.0 += 1;
-    created
-        .1
-        .get_or_insert_with(HashSet::new)
-        .insert(key.to_owned());
+    created.1.get_or_insert_with(HashSet::new).insert(key.to_owned());
 }
 
 /// Title pipelines created so far, and how many distinct ones.
@@ -508,12 +492,7 @@ impl Used {
     /// most `EARLY_MAX` (the oldest go once it is full).
     fn list(&self) -> Vec<String> {
         let earlier = self.before.iter().filter(|k| !self.now.contains(*k));
-        self.now
-            .iter()
-            .chain(earlier)
-            .take(EARLY_MAX)
-            .cloned()
-            .collect()
+        self.now.iter().chain(earlier).take(EARLY_MAX).cloned().collect()
     }
 }
 
@@ -527,22 +506,11 @@ fn used() -> std::sync::MutexGuard<'static, Option<Used>> {
     if used.is_none() {
         let listed = DIR
             .get()
-            .and_then(|d| {
-                crate::read_file(&d.join(EARLY_FILE))
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-            })
+            .and_then(|d| crate::read_file(&d.join(EARLY_FILE)).ok().and_then(|b| String::from_utf8(b).ok()))
             .unwrap_or_default();
-        let before: HashSet<String> = listed
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let before: HashSet<String> = listed.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect();
         tracing::info!(pipelines = before.len(), "title pipelines to start early");
-        *used = Some(Used {
-            before,
-            now: HashSet::new(),
-        });
+        *used = Some(Used { before, now: HashSet::new() });
     }
     used
 }
@@ -560,11 +528,7 @@ pub(crate) fn wanted_early(key: &str) -> bool {
 
 /// The title pipeline with `key` was drawn or dispatched with.
 pub(crate) fn note_used(key: &str) {
-    if used()
-        .get_or_insert_with(Used::default)
-        .now
-        .insert(key.to_owned())
-    {
+    if used().get_or_insert_with(Used::default).now.insert(key.to_owned()) {
         USED_CHANGED.store(true, Ordering::Relaxed);
     }
 }
@@ -588,20 +552,12 @@ mod tests {
     /// This run's keys stay in the list; earlier runs' fill it up to the cap.
     #[test]
     fn the_early_list_keeps_this_run_first() {
-        let keys =
-            |r: std::ops::Range<usize>| r.map(|i| format!("{i:032x}")).collect::<HashSet<_>>();
-        let used = Used {
-            before: keys(0..EARLY_MAX),
-            now: keys(EARLY_MAX - 10..EARLY_MAX + 10),
-        };
+        let keys = |r: std::ops::Range<usize>| r.map(|i| format!("{i:032x}")).collect::<HashSet<_>>();
+        let used = Used { before: keys(0..EARLY_MAX), now: keys(EARLY_MAX - 10..EARLY_MAX + 10) };
         let list = used.list();
         assert_eq!(list.len(), EARLY_MAX);
         assert!(used.now.iter().all(|k| list.contains(k)));
-        assert_eq!(
-            list.iter().collect::<HashSet<_>>().len(),
-            EARLY_MAX,
-            "no key twice"
-        );
+        assert_eq!(list.iter().collect::<HashSet<_>>().len(), EARLY_MAX, "no key twice");
     }
 
     /// The pre-build's list holds only for the library bytes it was

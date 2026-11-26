@@ -96,13 +96,11 @@ fn atomic_locks() -> bool {
 /// `VICTORY_BIAS_AS_GRADIENTS=0` or `1` overrides.
 fn bias_as_gradients() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(
-        || match std::env::var("VICTORY_BIAS_AS_GRADIENTS").as_deref() {
-            Ok("0") => false,
-            Ok("1") => true,
-            _ => under_wine(),
-        },
-    )
+    *ON.get_or_init(|| match std::env::var("VICTORY_BIAS_AS_GRADIENTS").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => under_wine(),
+    })
 }
 
 /// Whether translations take wave64 programs to run in 32-lane host waves:

@@ -175,17 +175,12 @@ fn next_frame(data: &[u8], start: usize, end: usize) -> Option<usize> {
     // A frame that ends in a packet where no frame begins (the tail of a frame
     // that crossed packets, then padding) is the last one before the next
     // packet that has frames.
-    let ends_in_packet_without_frames = end / PACKET_BITS != index
-        && !end.is_multiple_of(PACKET_BITS)
-        && packet(data, end / PACKET_BITS)?.frames == 0;
-    if end.is_multiple_of(PACKET_BITS)
-        || (last && end / PACKET_BITS == index)
-        || ends_in_packet_without_frames
-    {
+    let ends_in_packet_without_frames =
+        end / PACKET_BITS != index && !end.is_multiple_of(PACKET_BITS) && packet(data, end / PACKET_BITS)?.frames == 0;
+    if end.is_multiple_of(PACKET_BITS) || (last && end / PACKET_BITS == index) || ends_in_packet_without_frames {
         // The next frame begins in the next packet of this stream that has one;
         // a packet with none (a frame spans all of it) holds no start.
-        let mut next =
-            (end - 1) / PACKET_BITS + 1 + packet(data, (end - 1) / PACKET_BITS)?.skip as usize;
+        let mut next = (end - 1) / PACKET_BITS + 1 + packet(data, (end - 1) / PACKET_BITS)?.skip as usize;
         let mut header = packet(data, next)?;
         while header.frames == 0 {
             next += 1 + header.skip as usize;
@@ -1264,12 +1259,7 @@ mod tests {
         let frame = read_frame(&data, second).unwrap();
         assert_eq!(frame.bits, bits);
         assert_eq!(frame.next, Some(3 * PACKET_BITS + HEADER_BITS));
-        assert_eq!(
-            read_frame(&data, 3 * PACKET_BITS + HEADER_BITS)
-                .unwrap()
-                .next,
-            None
-        );
+        assert_eq!(read_frame(&data, 3 * PACKET_BITS + HEADER_BITS).unwrap().next, None);
     }
 
     /// The direct sum `imdct_half` stands for (FFmpeg's naive inverse MDCT:
