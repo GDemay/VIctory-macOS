@@ -153,6 +153,7 @@ fn lowered_with(
         view_marks: false,
         atomic_locks: false,
         atomic_lock_rounds: false,
+        atomic_umax: false,
         bias_as_gradients: false,
         narrow_waves,
         host_wave32,
