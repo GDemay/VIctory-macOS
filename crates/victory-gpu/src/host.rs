@@ -2589,6 +2589,8 @@ impl Batch {
         let _timed = crate::watch::Timed(std::time::Instant::now(), crate::copystat::C::FlushUs);
         self.pending.clear();
         let mut total = 0;
+        #[cfg(feature = "diagnostics")]
+        let mut counted = crate::copystat::hold();
         for (shadow, ranges) in self.refreshes.drain(..) {
             let key = std::sync::Arc::as_ptr(&shadow) as usize;
             let (start, len) = shadow.range();
@@ -2598,7 +2600,7 @@ impl Batch {
                 let us = started.elapsed().as_micros() as u64;
                 #[cfg(feature = "diagnostics")]
                 {
-                    crate::copystat::range(from, to - from, us, 0);
+                    counted.range(from, to - from, us, 0);
                     self.summary
                         .record(from as u64, (to - from) as u64, shadow.gpu(from as u64));
                 }
