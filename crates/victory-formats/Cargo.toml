@@ -13,3 +13,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "table_runs"
+harness = false
