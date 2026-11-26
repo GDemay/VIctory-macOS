@@ -10,7 +10,8 @@
 //! same physical pages) in the runtime's memory; elsewhere, the whole memory
 //! compared with the bytes last detiled at every submission that samples it.
 //!
-//! shortcut: a change detiles the whole texture, not the pages written.
+//! A tracked texture re-detiles only the subresources whose pages changed;
+//! an untracked one detiles the whole texture on any change.
 //! Textures read through descriptor tables are brought up to date, and for
 //! shaders that index the heap themselves every texture with a resource
 //! object the heap views (`crate::bindless`); textures the title placed in
