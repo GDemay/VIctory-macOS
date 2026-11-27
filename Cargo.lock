@@ -806,6 +806,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "victory-formats",
+ "victory-game",
  "victory-pipeline",
  "victory-shader",
  "windows",

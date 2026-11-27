@@ -160,6 +160,43 @@ This was the "signed zero in minimums" difference listed here before. Each `v_mi
 
 `container::shader_hash` now writes the MD5 of the program into the `HASH` part. The minimum cases run under Wine again, and both tests pass in every order on an M5 Pro with D3DMetal 4.0 beta 3. Cache entries written under the old zero hash are never looked up again, so old caches need no cleaning.
 
+## Prewarm a recorded working set
+
+On a Mac with limited memory, start with a regular run. Let VIctory translate and compile pipelines as the game needs them, visit the scene you want to warm, and exit normally so VIctory saves its usage history. First visits can stall while the missing pipelines compile.
+
+Use `tools/macos/victory.sh config` with the same configuration and Wine prefix to find `cache_dir`. Copy `<cache_dir>/pipelines/early-pipelines.txt` to a file outside the source tree. It lists full pipeline keys for work requested by draws and dispatches, including attempts that could not complete. A normal build records it and retains up to 8,192 keys across runs. Keep a copy for a reproducible selection, since later runs update the history.
+
+```sh
+tools/macos/victory.sh translate --cache --pipeline-selection "/absolute/path/to/working-set.txt"
+```
+
+With no input paths supplied, this uses the configured game and test-title paths. Use the same game build and shader pack as the recording. The selection takes one 32-digit hexadecimal key per line. It ignores blank lines and duplicates. The command reports excluded pack records, duplicate matches, prebuilt entries, library loads, new builds and refusals. Records whose shaders or state cannot be resolved are counted separately. Missing or malformed selection files and missing shader packs fail the command. Unmatched keys are listed and skipped. They can come from a different pack or from pipeline states generated only at runtime. An empty file or a file with no matches warms zero pipelines.
+
+The command translates and builds the matching pipelines as needed. When you run the game, any pipeline outside that set still follows the normal runtime path. Use `translate --cache` for translation alone or explicitly request the entire pack with `translate --cache --pipelines`. A [game report in #554](https://github.com/pragyaangaur/VIctory-macOS/issues/554#issuecomment-7226327216) found that D3DMetal loaded a substantial portion of a full-pack cache into native memory at device creation.
+
+### Recover an oversized D3DMetal cache
+
+Selective prewarming limits future work. To reclaim memory from a cache already populated by full-pack prewarming, move the existing cache aside before the next launch.
+
+1. Close the game and all VIctory and prewarm processes using the same cache or executable name. Locate the VIctory cache with `config`. A Windows `Z:\` path denotes the corresponding Mac filesystem path. A `C:\` path is under the active Wine prefix's `drive_c`.
+2. Move the directory `$(getconf DARWIN_USER_CACHE_DIR)d3dm/<exe name>` to a new backup directory beside it. For the default launcher the executable is `victory.exe`. Use the name of the Windows VIctory executable, including `.exe`. If you already moved this directory, continue with the next step.
+3. In `<cache_dir>/pipelines`, move whichever of `host-pipelines.bin`, `host-pipelines.next` and `prebuilt-pipelines.txt` exist into a separate backup directory. Keep `early-pipelines.txt` in place, as well as `<cache_dir>/shaders` and other cache directories. The prebuilt index describes its matching host library. An index that survives a driver-only reset can make prewarming skip work, and a pending `.next` file can restore the old library on startup.
+4. Use the saved selection and the same executable name to prewarm the working set, or let the next run fill the cache on demand. A later process can reuse what the new cache holds. To roll back, stop those processes again, move the newly created counterparts aside, and restore the backed-up driver directory and matching VIctory files. The usage history can stay in place.
+
+### Compare the same scene
+
+For a game test, save the usage history after a normal run through the scene. Record the original cache size, time until the host device is ready, process footprint and memory pressure, pipeline activity, frame times, and rendering. Recover the cache if needed, prewarm the saved selection, and revisit the same scene from a fresh process with the same settings. Record first-visit and repeat-visit numbers separately. VIctory's pipeline creation and library-load counts can show how much work moved out of play. They count host calls and may include D3DMetal cache hits.
+
+### Reproduce the synthetic hardware check
+
+From a checkout set up with CrossOver Wine and D3DMetal, run:
+
+```sh
+tools/macos/prewarm-cache.sh
+```
+
+Set `WINE` to the absolute path of the CrossOver Wine binary if using a separate checkout. The script generates its own shaders and pack, interleaves full and selective prebuilds, and checks fresh-process GPU output against CPU expectations. It measures process memory and tests cache recovery in a dedicated Wine prefix under a unique executable name. It prints where to find the logs and backed-up synthetic caches.
+
 ## Open differences under D3DMetal
 
 The merge of VIctory's changes up to 70564ae on 25 November 2026 brought new shader tests, and three of them find real differences in D3DMetal 4.0 beta 3 on an M4. The tests skip only those checks under Wine, so the rest of each test still runs.
