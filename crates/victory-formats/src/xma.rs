@@ -201,6 +201,11 @@ struct Bits<'a> {
 
 impl Bits<'_> {
     fn peek32(&self) -> u32 {
+        let byte = self.pos / 8;
+        if let Some(bytes) = self.data.get(byte..).and_then(|s| s.get(..8)) {
+            let word = u64::from_be_bytes(bytes.try_into().expect("eight-byte lookahead"));
+            return ((word << (self.pos % 8)) >> 32) as u32;
+        }
         let mut v = 0u64;
         let byte = self.pos / 8;
         for i in 0..5 {
@@ -1854,6 +1859,29 @@ mod tests {
                 best.1
             );
             assert!(errors == 0 && snr > 40.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod lookahead_regression {
+    use super::*;
+    #[test]
+    fn packed_lookahead_matches_zero_padded_bytes() {
+        let data: Vec<_> = (0..65).map(|i| (i * 71) as u8).collect();
+        for len in 0..=data.len() {
+            for pos in 0..len * 8 + 40 {
+                let bits = Bits {
+                    data: &data[..len],
+                    pos,
+                    end: len * 8,
+                };
+                let mut v = 0u64;
+                for i in 0..5 {
+                    v = (v << 8) | u64::from(*data[..len].get(pos / 8 + i).unwrap_or(&0));
+                }
+                assert_eq!(bits.peek32(), (v << (24 + pos % 8) >> 32) as u32);
+            }
         }
     }
 }
