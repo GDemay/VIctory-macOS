@@ -3755,11 +3755,14 @@ mod tests {
         assert!(crate::resource::made_copy(texture).is_some(), "with a host texture again");
     }
 
-    /// Work to run while a view's texture is prepared, once (tests).
-    pub(crate) static WHILE_PREPARING: std::sync::Mutex<Option<crate::descriptor::tests::Work>> = std::sync::Mutex::new(None);
+    thread_local! {
+        // Only preparation on the test's own thread may consume its hook.
+        static WHILE_PREPARING: std::cell::RefCell<Option<crate::descriptor::tests::Work>> =
+            const { std::cell::RefCell::new(None) };
+    }
 
     pub(crate) fn while_preparing() {
-        let work = WHILE_PREPARING.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let work = WHILE_PREPARING.with_borrow_mut(Option::take);
         if let Some(work) = work {
             work();
         }
@@ -3791,7 +3794,7 @@ mod tests {
             resource,
             0x10,
         );
-        *WHILE_PREPARING.lock().unwrap() = Some(Box::new(move || {
+        WHILE_PREPARING.replace(Some(Box::new(move || {
             // The title's last reference goes while the view is being made.
             // The call must not wait for the make: this very thread is the
             // one making the view, so a wait would never end.
@@ -3805,10 +3808,10 @@ mod tests {
                 std::thread::yield_now();
             }
             assert_eq!(released.join().unwrap(), 1, "the pin still holds it");
-        }));
+        })));
 
         let view = heap.mirror(0, at, false).expect("the current view");
-        assert!(WHILE_PREPARING.lock().unwrap().is_none(), "the prepare ran");
+        assert!(WHILE_PREPARING.with_borrow(Option::is_none), "the prepare ran");
         assert!(heap.made(0), "the view was made from the live resource");
         assert!(
             crate::descriptor::view(at).is_some(),
@@ -3847,14 +3850,14 @@ mod tests {
         let host = title_heap.host().expect("a host view heap");
         let (done, waited) = std::sync::mpsc::channel();
         let second_view = view_of(second);
-        *WHILE_PREPARING.lock().unwrap() = Some(Box::new(move || {
+        WHILE_PREPARING.replace(Some(Box::new(move || {
             // The title writes the other record into the slot meanwhile.
             std::thread::spawn(move || {
                 crate::descriptor::create_placed_srv(std::ptr::null(), &words, &second_view, at);
                 done.send(()).unwrap();
             });
             assert!(waited.recv_timeout(std::time::Duration::from_secs(5)).is_ok(), "the write waits");
-        }));
+        })));
         // A draw reads the slot: its first record is prepared.
         assert!(host.mirror(s, at, true).is_some());
         let second_texture = crate::resource::texture_at(second, &words).expect("its resource");
@@ -3890,7 +3893,7 @@ mod tests {
         let heap_at = title_heap.start;
         let heap = heap as usize;
         let (done, waited) = std::sync::mpsc::channel();
-        *WHILE_PREPARING.lock().unwrap() = Some(Box::new(move || {
+        WHILE_PREPARING.replace(Some(Box::new(move || {
             std::thread::spawn(move || {
                 let h = crate::descriptor::heap(heap as crate::object::This);
                 h.host().unwrap().mirror(second, heap_at + u64::from(second) * 32, true);
@@ -3900,9 +3903,9 @@ mod tests {
                 waited.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
                 "a view bound while another slot's texture is made waits"
             );
-        }));
+        })));
         assert!(host.mirror(first, slot(first), true).is_some());
-        assert!(WHILE_PREPARING.lock().unwrap().is_none(), "the prepare ran");
+        assert!(WHILE_PREPARING.with_borrow(Option::is_none), "the prepare ran");
         assert!(host.kept(first) && host.kept(second), "both made");
     }
 
@@ -4894,16 +4897,16 @@ mod tests {
             expected_c.as_mut_ptr() as u64,
         );
         let expected_c_key = u64::from(expected_c[2]) << 32 | u64::from(expected_c[1]);
-        *WHILE_PREPARING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(move || {
+        WHILE_PREPARING.replace(Some(Box::new(move || {
             crate::descriptor::create_srv(
                 std::ptr::null(),
                 buf_c_addr as crate::object::This,
                 &srv_desc,
                 race_addr,
             );
-        }));
+        })));
         host.sync_slots_bytes_with(0..128, start, 32, start, &title_heap[..128 * 32], true);
-        assert!(WHILE_PREPARING.lock().unwrap_or_else(|e| e.into_inner()).is_none());
+        assert!(WHILE_PREPARING.with_borrow(Option::is_none));
         assert_eq!(
             host.synced[race_slot as usize].load(Ordering::Acquire),
             expected_c_key,
