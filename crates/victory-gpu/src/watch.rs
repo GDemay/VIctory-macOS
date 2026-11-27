@@ -876,67 +876,115 @@ impl Tracked {
         runs
     }
 
-    /// [`Tracked::take`], the runs on pages with nothing mapped apart: they
-    /// read as zeros, with no copy to try (each such page cost a dozen
-    /// failing kernel reads, 7-30 ms a frame in run perf4).
-    pub(crate) fn take_split(&self, from: usize, to: usize) -> (Runs, Runs) {
-        let (from, to) = (from.max(self.start), to.min(self.end));
-        if from >= to {
-            return (Vec::new(), Vec::new());
-        }
-        let pages: Vec<usize> = {
+    /// [`Tracked::take_split`] of several ranges at once: one split pair per
+    /// range, in order, with the process's guard lock taken once for all of
+    /// them instead of once a range (a copy of many ranges took it as many
+    /// times). A page two ranges share is taken by the first of them, as the
+    /// first of as many calls would have taken it, leaving the others to see
+    /// it changed no more.
+    pub(crate) fn take_split_many(&self, ranges: &[(usize, usize)]) -> Vec<(Runs, Runs)> {
+        let clipped: Vec<(usize, usize)> = ranges
+            .iter()
+            .map(|&(from, to)| (from.max(self.start), to.min(self.end)))
+            .collect();
+        let pages: Vec<Vec<usize>> = {
             #[cfg(feature = "diagnostics")]
             let waited = Timed(std::time::Instant::now(), crate::copystat::C::GuardWaitUs);
             let changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
             #[cfg(feature = "diagnostics")]
             drop(waited);
-            changed.range(from / PAGE..to.div_ceil(PAGE)).copied().collect()
+            clipped
+                .iter()
+                .map(|&(from, to)| {
+                    if from >= to {
+                        return Vec::new();
+                    }
+                    changed.range(from / PAGE..to.div_ceil(PAGE)).copied().collect()
+                })
+                .collect()
         };
-        if pages.is_empty() {
-            return (Vec::new(), Vec::new());
+        if pages.iter().all(Vec::is_empty) {
+            return vec![(Vec::new(), Vec::new()); ranges.len()];
         }
         let whole: Vec<usize> = pages
             .iter()
+            .flatten()
             .copied()
-            .filter(|&p| (p * PAGE).max(self.start) >= from && ((p + 1) * PAGE).min(self.end) <= to)
+            .filter(|&p| {
+                clipped.iter().any(|&(from, to)| {
+                    (p * PAGE).max(self.start) >= from && ((p + 1) * PAGE).min(self.end) <= to
+                })
+            })
             .collect();
-        let mut unmapped = Vec::new();
-        if !whole.is_empty() {
-            // Every address showing the same pages is guarded too. A write in
-            // between marks them changed again; the copy, made after, has it.
-            #[cfg(feature = "diagnostics")]
-            let waited = Timed(std::time::Instant::now(), crate::copystat::C::GuardWaitUs);
-            let mut g = guards();
-            #[cfg(feature = "diagnostics")]
-            drop(waited);
-            #[cfg(feature = "diagnostics")]
-            let asked = Timed(std::time::Instant::now(), crate::copystat::C::AliasUs);
-            let others = aliases(&g, &whole);
-            #[cfg(feature = "diagnostics")]
-            drop(asked);
-            protect_with_aliases(&mut g, &whole, &others, true, Some(&mut unmapped), |taken| {
-                {
-                    let mut changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
-                    for &page in taken {
-                        changed.remove(&page);
-                    }
-                    set_dirty(self.changed.2, !changed.is_empty());
+        let push = |out: &mut Vec<(Runs, Runs)>, pages: &[usize], from: usize, to: usize, unmapped: &[usize]| {
+            let (mut copy, mut zero): (Runs, Runs) = (Vec::new(), Vec::new());
+            for &p in pages {
+                let (a, b) = ((p * PAGE).max(from), ((p + 1) * PAGE).min(to));
+                let runs = if unmapped.binary_search(&p).is_ok() { &mut zero } else { &mut copy };
+                match runs.last_mut() {
+                    Some((_, end)) if *end == a => *end = b,
+                    _ => runs.push((a, b)),
                 }
-                self.changed.taken_many(taken);
-            });
-            drop(g);
-            unmapped.sort_unstable();
-        }
-        let (mut copy, mut zero): (Runs, Runs) = (Vec::new(), Vec::new());
-        for p in pages {
-            let (a, b) = ((p * PAGE).max(from), ((p + 1) * PAGE).min(to));
-            let runs = if unmapped.binary_search(&p).is_ok() { &mut zero } else { &mut copy };
-            match runs.last_mut() {
-                Some((_, end)) if *end == a => *end = b,
-                _ => runs.push((a, b)),
             }
+            out.push((copy, zero));
+        };
+        let mut unmapped = Vec::new();
+        let mut taken: BTreeSet<usize> = BTreeSet::new();
+        let mut out: Vec<(Runs, Runs)> = Vec::with_capacity(ranges.len());
+        if whole.is_empty() {
+            for (i, &(from, to)) in clipped.iter().enumerate() {
+                push(&mut out, &pages[i], from, to, &unmapped);
+            }
+            return out;
         }
-        (copy, zero)
+        // Every address showing the same pages is guarded too. A write in
+        // between marks them changed again; the copy, made after, has it.
+        #[cfg(feature = "diagnostics")]
+        let waited = Timed(std::time::Instant::now(), crate::copystat::C::GuardWaitUs);
+        let mut g = guards();
+        #[cfg(feature = "diagnostics")]
+        drop(waited);
+        #[cfg(feature = "diagnostics")]
+        let asked = Timed(std::time::Instant::now(), crate::copystat::C::AliasUs);
+        let others = aliases(&g, &whole);
+        #[cfg(feature = "diagnostics")]
+        drop(asked);
+        for (i, &(from, to)) in clipped.iter().enumerate() {
+            let pages: Vec<usize> = pages[i]
+                .iter()
+                .copied()
+                .filter(|p| !taken.contains(p))
+                .collect();
+            // Partial pages are copied but stay dirty for a later request.
+            let whole: Vec<usize> = pages
+                .iter()
+                .copied()
+                .filter(|&p| {
+                    (p * PAGE).max(self.start) >= from && ((p + 1) * PAGE).min(self.end) <= to
+                })
+                .collect();
+            protect_with_aliases(&mut g, &whole, &others, true, Some(&mut unmapped), |pages| {
+                let mut changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
+                for &page in pages {
+                    changed.remove(&page);
+                    taken.insert(page);
+                }
+                set_dirty(self.changed.2, !changed.is_empty());
+                drop(changed);
+                self.changed.taken_many(pages);
+            });
+            unmapped.sort_unstable();
+            push(&mut out, &pages, from, to, &unmapped);
+        }
+        drop(g);
+        out
+    }
+
+    /// [`Tracked::take`], the runs on pages with nothing mapped apart: they
+    /// read as zeros, with no copy to try (each such page cost a dozen
+    /// failing kernel reads, 7-30 ms a frame in run perf4).
+    pub(crate) fn take_split(&self, from: usize, to: usize) -> (Runs, Runs) {
+        self.take_split_many(&[(from, to)]).pop().unwrap()
     }
 
     /// Whether page `page` (a page number) changed since it was taken.
@@ -2284,6 +2332,26 @@ pub(crate) mod tests {
         assert!(t.take(p, p + 3 * PAGE).is_empty());
         assert!(t.clean());
         drop(t);
+        free(p);
+    }
+
+    #[test]
+    fn batched_partial_ranges_match_sequential_takes() {
+        let p = pool(3);
+        let ranges = [
+            (p + 100, p + PAGE + 10),
+            (p + PAGE + 20, p + 2 * PAGE),
+            (p + PAGE, p + 3 * PAGE),
+            (p, p),
+            (p, p + 3 * PAGE),
+        ];
+        let sequential = track(p, 3 * PAGE, true).expect("tracked");
+        let expected: Vec<_> = ranges.iter().map(|&(a, b)| sequential.take_split(a, b)).collect();
+        drop(sequential);
+        let batched = track(p, 3 * PAGE, true).expect("tracked");
+        assert_eq!(batched.take_split_many(&ranges), expected);
+        assert!(batched.clean(), "the final range takes the remaining partial page");
+        drop(batched);
         free(p);
     }
 

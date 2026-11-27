@@ -1032,143 +1032,211 @@ impl Shadow {
 
     /// At submission: copies what changed of `[address, address + len)`
     /// since it was last copied (all of it if the memory is not
-    /// write-watched). Returns the bytes copied.
+    /// write-watched). Returns the bytes copied. The host copies a range
+    /// list as one batch ([`Shadow::update_ranges`]); one range asks it.
+    #[cfg(test)]
     pub(crate) fn update(&self, address: usize, len: usize) -> usize {
+        let mut copied = [0; 1];
+        self.update_ranges_into(&[(address, address.saturating_add(len))], &mut copied);
+        copied[0]
+    }
+
+    /// [`Shadow::update`] of several ranges at once: the same bytes, in the
+    /// same order, using `[from, to)` endpoints and one copied-byte count per
+    /// range (in order). What a range took a lock for — the widened source,
+    /// and under it the process's
+    /// guard lock — is taken once for all of them.
+    pub(crate) fn update_ranges(&self, ranges: &[(usize, usize)]) -> Vec<usize> {
+        let mut copied = vec![0; ranges.len()];
+        self.update_ranges_into(ranges, &mut copied);
+        copied
+    }
+
+    /// [`Shadow::update_ranges`], the counts left in `copied` (one a range,
+    /// in order) instead of returned: a copy of one range asks with one on
+    /// the stack.
+    fn update_ranges_into(&self, ranges: &[(usize, usize)], copied: &mut [usize]) {
+        if ranges.is_empty() {
+            return;
+        }
         if self.aliased {
             if self.has_widened.load(Ordering::Acquire) {
                 let (start, end) = (self.start as usize, (self.start + self.len) as usize);
-                let (from, to) = (address.max(start), address.saturating_add(len).min(end));
-                if from < to {
-                    let _source = self.widened_source.lock().unwrap_or_else(|e| e.into_inner());
-                    self.refresh_widened(from, to);
+                let _source = self.widened_source.lock().unwrap_or_else(|e| e.into_inner());
+                for &(from, to) in ranges {
+                    let (from, to) = (from.max(start), to.min(end));
+                    if from < to {
+                        self.refresh_widened(from, to);
+                    }
                 }
             }
-            return 0;
+            return;
         }
         // Most copies are clean; the lock is only for the ones that are not.
         if self.clean() {
-            return 0;
+            return;
         }
         let _source = self.widened_source.lock().unwrap_or_else(|e| e.into_inner());
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
-        let (from, to) = (address.max(start), (address + len).min(end));
-        if from >= to {
-            return 0;
-        }
-        let mut busy: Vec<(usize, usize)> = self
-            .pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let clipped: Vec<(usize, usize)> = ranges
             .iter()
-            .copied()
-            .filter(|&(a, e)| a < to && e > from)
+            .map(|&(from, to)| (from.max(start), to.min(end)))
             .collect();
         if self.tracked.is_some() {
-            return self.update_tracked(from, to, !busy.is_empty());
+            let busy: Vec<bool> = clipped
+                .iter()
+                .map(|&(from, to)| {
+                    from < to
+                        && self
+                            .pending
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .iter()
+                            .any(|&(a, e)| a < to && e > from)
+                })
+                .collect();
+            return self.update_tracked_ranges(&clipped, &busy, copied);
         }
-        if !busy.is_empty() {
-            // Around ranges shaders are writing: the gaps, each as below
-            // (in the world most submissions have such ranges; copying the
-            // gaps whole cost ~1 s per frame). Under them, the title's bytes
-            // as well, as nothing says what it wrote since: a submission
-            // waits for the one before it, so none of this submission's
-            // shaders has run yet, and a constant the title wrote there
-            // would stay stale for the whole submission. The same bytes go
-            // into the snapshot `writing` took, so copy-back tells the
-            // shader's write from them.
-            busy.sort_unstable();
-            let (mut at, mut bytes) = (from, 0);
-            for (a, e) in busy {
-                let (a, e) = (a.max(from), e.min(to));
-                if a > at {
-                    bytes += self.update_untracked(at, a);
-                }
-                if e > a.max(at) {
-                    let (a, e) = (a.max(at), e);
-                    bytes += self.update_untracked(a, e);
-                    self.sync_snapshot(a, e);
-                }
-                at = at.max(e);
+        for (i, &(from, to)) in clipped.iter().enumerate() {
+            if from >= to {
+                continue;
             }
-            if at < to {
-                bytes += self.update_untracked(at, to);
-            }
-            return bytes;
+            let busy: Vec<(usize, usize)> = self
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .copied()
+                .filter(|&(a, e)| a < to && e > from)
+                .collect();
+            copied[i] = if busy.is_empty() {
+                self.update_untracked(from, to)
+            } else {
+                // Around ranges shaders are writing: the gaps, each as below
+                // (in the world most submissions have such ranges; copying the
+                // gaps whole cost ~1 s per frame). Under them, the title's bytes
+                // as well, as nothing says what it wrote since: a submission
+                // waits for the one before it, so none of this submission's
+                // shaders has run yet, and a constant the title wrote there
+                // would stay stale for the whole submission. The same bytes go
+                // into the snapshot `writing` took, so copy-back tells the
+                // shader's write from them.
+                let mut busy = busy;
+                busy.sort_unstable();
+                let (mut at, mut bytes) = (from, 0);
+                for (a, e) in busy {
+                    let (a, e) = (a.max(from), e.min(to));
+                    if a > at {
+                        bytes += self.update_untracked(at, a);
+                    }
+                    if e > a.max(at) {
+                        let (a, e) = (a.max(at), e);
+                        bytes += self.update_untracked(a, e);
+                        self.sync_snapshot(a, e);
+                    }
+                    at = at.max(e);
+                }
+                if at < to {
+                    bytes += self.update_untracked(at, to);
+                }
+                bytes
+            };
         }
-        self.update_untracked(from, to)
     }
 
-    /// [`Shadow::update`] of `[from, to)` (inside the buffer) where the
-    /// memory is tracked: the pages the title wrote since they were taken,
-    /// in one [`crate::watch::Tracked::take`], so that a page wholly in the
-    /// range is guarded even where shaders write part of it (split at those
-    /// ranges it stayed changed, and [`Shadow::copy_back_marked`] dropped
-    /// what they wrote).
+    /// [`Shadow::update_ranges`] where the memory is tracked: the pages the
+    /// title wrote since they were taken, in one
+    /// [`crate::watch::Tracked::take_split_many`], so that a page wholly in
+    /// a range is guarded even where shaders write part of it (split at
+    /// those ranges it stayed changed, and [`Shadow::copy_back_marked`]
+    /// dropped what they wrote).
     ///
-    /// `busy`: a list submitted earlier declared that shaders write in the
-    /// range. A submission waits for the one before it, so none of this
-    /// submission's shaders has run yet: the pages the title wrote are
-    /// copied as anywhere else. Skipped, the title's constants there stayed
-    /// stale for the whole submission (a dispatch read its sizes as zeros
-    /// and looped until the device was removed). The same bytes go into the
-    /// snapshot `writing` took, so copy-back neither takes them for the
-    /// GPU's nor puts them back over a later title write.
-    fn update_tracked(&self, from: usize, to: usize, busy: bool) -> usize {
+    /// `busy`: per range, whether a list submitted earlier declared that
+    /// shaders write there. A submission waits for the one before it, so
+    /// none of this submission's shaders has run yet: the pages the title
+    /// wrote are copied as anywhere else. Skipped, the title's constants
+    /// there stayed stale for the whole submission (a dispatch read its
+    /// sizes as zeros and looped until the device was removed). The same
+    /// bytes go into the snapshot `writing` took, so copy-back neither takes
+    /// them for the GPU's nor puts them back over a later title write.
+    fn update_tracked_ranges(
+        &self,
+        ranges: &[(usize, usize)],
+        busy: &[bool],
+        copied: &mut [usize],
+    ) {
         let Some(t) = &self.tracked else {
-            return 0;
+            return;
         };
-        for (a, b) in t.take_retaken(from, to) {
-            self.forget_sums(a, b);
+        for &(from, to) in ranges {
+            if from >= to {
+                continue;
+            }
+            for (a, b) in t.take_retaken(from, to) {
+                self.forget_sums(a, b);
+            }
         }
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
-        let (runs, unmapped) = t.take_split(from, to);
+        let splits = t.take_split_many(ranges);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::WatchUs, started.elapsed().as_micros() as u64);
         let start = self.start as usize;
-        let mut before = busy.then(|| self.before.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut sync_before = |a: usize, b: usize| {
-            if let Some(before) = &mut before {
-                self.sync_snapshot_in(before, a, b);
+        let mut before = busy
+            .iter()
+            .any(|busy| *busy)
+            .then(|| self.before.lock().unwrap_or_else(|e| e.into_inner()));
+        for (i, ((from, to), (runs, unmapped))) in ranges.iter().copied().zip(splits).enumerate() {
+            if from >= to {
+                continue;
             }
-        };
-        let mut copied = 0;
-        for (a, b) in runs {
-            copied += self.copy(a, b);
-            sync_before(a, b);
-        }
-        for (a, b) in unmapped {
-            // SAFETY: inside the mapping (`take_split` cuts to the buffer).
-            unsafe { self.data.add(a - start).write_bytes(0, b - a) };
-            self.forget_sums(a, b);
-            if self.has_widened.load(Ordering::Acquire) {
-                self.refresh_widened(a, b);
+            // Only a range shaders may write in goes into the snapshot, as
+            // one range asked for itself.
+            let busy = busy[i];
+            let mut sync_before = |a: usize, b: usize| {
+                let before = if busy { before.as_mut() } else { None };
+                if let Some(before) = before {
+                    self.sync_snapshot_in(before, a, b);
+                }
+            };
+            let mut bytes = 0;
+            for (a, b) in runs {
+                bytes += self.copy(a, b);
+                sync_before(a, b);
             }
-            sync_before(a, b);
-            #[cfg(feature = "diagnostics")]
-            crate::copystat::add(crate::copystat::C::Unmapped, (b - a) as u64);
-        }
-        // Parts on memory that is not the runtime's: whole, as below.
-        for (a, b) in t.untracked(from, to) {
-            #[cfg(feature = "diagnostics")]
-            let started = std::time::Instant::now();
-            copied += self.copy(a, b);
-            sync_before(a, b);
+            for (a, b) in unmapped {
+                // SAFETY: inside the mapping (`take_split_many` cuts to the buffer).
+                unsafe { self.data.add(a - start).write_bytes(0, b - a) };
+                self.forget_sums(a, b);
+                if self.has_widened.load(Ordering::Acquire) {
+                    self.refresh_widened(a, b);
+                }
+                sync_before(a, b);
+                #[cfg(feature = "diagnostics")]
+                crate::copystat::add(crate::copystat::C::Unmapped, (b - a) as u64);
+            }
+            // Parts on memory that is not the runtime's: whole, as below.
+            for (a, b) in t.untracked(from, to) {
+                #[cfg(feature = "diagnostics")]
+                let started = std::time::Instant::now();
+                bytes += self.copy(a, b);
+                sync_before(a, b);
+                #[cfg(feature = "diagnostics")]
+                {
+                    use crate::copystat::{C, add};
+                    add(C::WholeBytes, (b - a) as u64);
+                    add(C::WholeUs, started.elapsed().as_micros() as u64);
+                }
+            }
+            copied[i] = bytes;
             #[cfg(feature = "diagnostics")]
             {
                 use crate::copystat::{C, add};
-                add(C::WholeBytes, (b - a) as u64);
-                add(C::WholeUs, started.elapsed().as_micros() as u64);
+                add(C::Watches, 1);
+                add(C::Checked, (to - from) as u64);
+                add(C::Unchanged, (to - from).saturating_sub(bytes) as u64);
             }
         }
-        #[cfg(feature = "diagnostics")]
-        {
-            use crate::copystat::{C, add};
-            add(C::Watches, 1);
-            add(C::Checked, (to - from) as u64);
-            add(C::Unchanged, (to - from).saturating_sub(copied) as u64);
-        }
-        copied
     }
 
     /// Puts the copy's bytes of `[a, b)` (title addresses), just updated,
@@ -2944,6 +3012,29 @@ pub(crate) mod tests {
         assert_eq!(free_locks(&mut words), 0, "none the second time");
         assert_eq!(take_count(&mut words), 0xA5A5_A5A5, "the give-up count");
         assert_eq!(take_count(&mut words), 0, "taken once");
+    }
+
+    #[test]
+    fn batched_refresh_uses_endpoints_and_preserves_gaps() {
+        let p = crate::watch::tests::pool(3);
+        let len = 3 * PAGE;
+        register(p, p as u64, len as u64);
+        let Some(copy) = find(p as u64, len as u64) else {
+            unregister(p, p as u64);
+            return;
+        };
+        copy.update(p, len);
+        // SAFETY: writes within our three-page pool.
+        unsafe { (p as *mut u8).write_bytes(0x5a, len) };
+        assert_eq!(
+            copy.update_ranges(&[(p, p + PAGE), (p + 2 * PAGE, p + len)]),
+            [PAGE, PAGE]
+        );
+        assert_eq!(copy.read_host(p as u64, 1), [0x5a5a5a5a]);
+        assert_eq!(copy.read_host((p + PAGE) as u64, 1), [0], "gap is not refreshed");
+        assert_eq!(copy.read_host((p + 2 * PAGE) as u64, 1), [0x5a5a5a5a]);
+        assert_eq!(copy.update(p + PAGE, PAGE), PAGE, "gap stays dirty");
+        unregister(p, p as u64);
     }
 
     /// The title writes a constant under a range an earlier list of the

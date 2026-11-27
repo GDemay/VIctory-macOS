@@ -4750,12 +4750,15 @@ impl Batch {
                 (0..work.len()).map(|_| Mutex::default()).collect();
             crate::texture::in_parallel(work.len(), |i| {
                 let (shadow, ranges) = &work[i];
-                let mut out = Vec::new();
-                for (from, to) in ranges.iter() {
-                    let started = std::time::Instant::now();
-                    let copied = shadow.update(from, to - from);
-                    let us = started.elapsed().as_micros() as u64;
-                    out.push((from, to, copied, us));
+                let collected = ranges.as_slice();
+                let started = std::time::Instant::now();
+                let copied = shadow.update_ranges(collected);
+                // The ranges are copied as one batch, so they are timed as
+                // one: its time is the first range's, the others none.
+                let us = started.elapsed().as_micros() as u64;
+                let mut out = Vec::with_capacity(collected.len());
+                for (n, (&(from, to), copied)) in collected.iter().zip(copied).enumerate() {
+                    out.push((from, to, copied, if n == 0 { us } else { 0 }));
                 }
                 *results[i].lock().unwrap_or_else(|e| e.into_inner()) = out;
             });
@@ -4789,10 +4792,13 @@ impl Batch {
         for (shadow, ranges) in work {
             let key = std::sync::Arc::as_ptr(&shadow) as usize;
             let (start, len) = shadow.range();
-            for (from, to) in ranges.iter() {
-                let started = std::time::Instant::now();
-                let copied = shadow.update(from, to - from);
-                let us = started.elapsed().as_micros() as u64;
+            let collected = ranges.as_slice();
+            let started = std::time::Instant::now();
+            let copied = shadow.update_ranges(collected);
+            // As above: the batch is timed as one, on its first range.
+            let us = started.elapsed().as_micros() as u64;
+            for (n, (&(from, to), copied)) in collected.iter().zip(copied).enumerate() {
+                let us = if n == 0 { us } else { 0 };
                 #[cfg(feature = "diagnostics")]
                 {
                     counted.range(from, to - from, us, 0);
