@@ -2264,7 +2264,7 @@ pub(crate) mod tests {
             user_data: 4,
             slot: 1,
         };
-        let made = state.tables(&list, &[range], &[(1, 8)], true);
+        let made = state.tables(&list, &[range], &[], true, &[(1, 8)], true);
         let [(1, offset)] = made[..] else {
             panic!("one fresh table for root parameter 1, not {made:?}");
         };
