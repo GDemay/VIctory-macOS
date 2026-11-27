@@ -146,7 +146,7 @@ mod packet_field_regression {
     #[test]
     fn packed_fields_match_bits_and_cursor_at_edges() {
         let data: Vec<_> = (0..6144).map(|i| (i * 37) as u8).collect();
-        for len in [0, 1, 2048, 6144] {
+        for len in [0, 1, 2, 3, 4, 5, 7, 8, 2047, 2048, 2049, 6144] {
             for pos in (0..64)
                 .chain(PACKET_BITS - 40..PACKET_BITS + 40)
                 .chain(len * 8..len * 8 + 8)
