@@ -559,6 +559,12 @@ pub struct Options {
     /// `VICTORY_P10`/`VICTORY_P20` inputs from a geometry shader. Used as a
     /// mesh+pixel fallback where no geometry stage exists.
     pub per_vertex_center: bool,
+    /// With [`Options::host_wave32`]: the two 32-lane halves of a console
+    /// wave pass each other values in divergent code too, waiting for each
+    /// other on group-shared memory (`lower::meet`), where without it such
+    /// a read across the halves is refused. The translation differs, so
+    /// the shader cache keys on it.
+    pub halves_rendezvous: bool,
 }
 
 /// Metal's limit on a mesh shader's outputs per thread group, in bytes
@@ -992,6 +998,13 @@ pub fn emit_with(
     )
 }
 
+/// Whether `what` refuses a program because its console wave64 runs as two
+/// 32-lane host waves that cannot meet where it needs them to.
+fn halves_refusal(what: &str) -> bool {
+    what.contains("(wave64 on a 32-lane host)")
+        || what.starts_with("LDS one console wave64 shares without barriers")
+}
+
 fn emit_pruned(
     input: &EmitInput<'_>,
     options: Options,
@@ -1082,11 +1095,35 @@ fn emit_pruned(
         host_wave32: options.host_wave32,
         narrow_waves: options.narrow_waves,
         uav_size_level0: options.uav_size_level0,
+        halves_rendezvous: options.halves_rendezvous,
     };
     let (l, heap_index_sources) = match lower::lower_pruned(&parts(st, res), keep,
         options.per_vertex_center,
         !options.disable_literal_halves,
     ) {
+        // A console wave the host splits into 32-lane halves needs both at
+        // each group barrier, and lanes that left early for the end never
+        // arrive; kept on to the end with EXEC off (`ir::keep_lanes_to_end`),
+        // they do. A program with no such early exit stays refused.
+        Err(e @ ShaderError::Unsupported { what, .. })
+            if options.host_wave32 && native.stage == HwStage::Cs && halves_refusal(what) =>
+        {
+            let Some(q) = crate::ir::keep_lanes_to_end(p) else {
+                return Err(e);
+            };
+            let st = structure::structure(&q)?;
+            let res = resource::track(&q, &native.layout, native.stage, Some(&st))?;
+            return emit_pruned(
+                &EmitInput {
+                    p: &q,
+                    st: &st,
+                    res: &res,
+                    ..*input
+                },
+                options,
+                keep,
+            );
+        }
         // Discarded lanes kept on as helpers can read what no surviving
         // lane does (a register only killed lanes skipped writing); such a
         // program kills them as the console does (`structure::killing`).
