@@ -1027,13 +1027,14 @@ impl Shadow {
     #[cfg(test)]
     pub(crate) fn update(&self, address: usize, len: usize) -> usize {
         let mut copied = [0; 1];
-        self.update_ranges_into(&[(address, len)], &mut copied);
+        self.update_ranges_into(&[(address, address.saturating_add(len))], &mut copied);
         copied[0]
     }
 
     /// [`Shadow::update`] of several ranges at once: the same bytes, in the
-    /// same order, one copied-byte count per range (in order). What a range
-    /// took a lock for — the widened source, and under it the process's
+    /// same order, using `[from, to)` endpoints and one copied-byte count per
+    /// range (in order). What a range took a lock for — the widened source,
+    /// and under it the process's
     /// guard lock — is taken once for all of them.
     pub(crate) fn update_ranges(&self, ranges: &[(usize, usize)]) -> Vec<usize> {
         let mut copied = vec![0; ranges.len()];
@@ -1052,8 +1053,8 @@ impl Shadow {
             if self.has_widened.load(Ordering::Acquire) {
                 let (start, end) = (self.start as usize, (self.start + self.len) as usize);
                 let _source = self.widened_source.lock().unwrap_or_else(|e| e.into_inner());
-                for &(address, len) in ranges {
-                    let (from, to) = (address.max(start), address.saturating_add(len).min(end));
+                for &(from, to) in ranges {
+                    let (from, to) = (from.max(start), to.min(end));
                     if from < to {
                         self.refresh_widened(from, to);
                     }
@@ -1069,7 +1070,7 @@ impl Shadow {
         let (start, end) = (self.start as usize, (self.start + self.len) as usize);
         let clipped: Vec<(usize, usize)> = ranges
             .iter()
-            .map(|&(address, len)| (address.max(start), (address + len).min(end)))
+            .map(|&(from, to)| (from.max(start), to.min(end)))
             .collect();
         if self.tracked.is_some() {
             let busy: Vec<bool> = clipped
@@ -2830,6 +2831,29 @@ pub(crate) mod tests {
         assert_eq!(free_locks(&mut words), 0, "none the second time");
         assert_eq!(take_count(&mut words), 0xA5A5_A5A5, "the give-up count");
         assert_eq!(take_count(&mut words), 0, "taken once");
+    }
+
+    #[test]
+    fn batched_refresh_uses_endpoints_and_preserves_gaps() {
+        let p = crate::watch::tests::pool(3);
+        let len = 3 * PAGE;
+        register(p, p as u64, len as u64);
+        let Some(copy) = find(p as u64, len as u64) else {
+            unregister(p, p as u64);
+            return;
+        };
+        copy.update(p, len);
+        // SAFETY: writes within our three-page pool.
+        unsafe { (p as *mut u8).write_bytes(0x5a, len) };
+        assert_eq!(
+            copy.update_ranges(&[(p, p + PAGE), (p + 2 * PAGE, p + len)]),
+            [PAGE, PAGE]
+        );
+        assert_eq!(copy.read_host(p as u64, 1), [0x5a5a5a5a]);
+        assert_eq!(copy.read_host((p + PAGE) as u64, 1), [0], "gap is not refreshed");
+        assert_eq!(copy.read_host((p + 2 * PAGE) as u64, 1), [0x5a5a5a5a]);
+        assert_eq!(copy.update(p + PAGE, PAGE), PAGE, "gap stays dirty");
+        unregister(p, p as u64);
     }
 
     /// The title writes a constant under a range an earlier list of the

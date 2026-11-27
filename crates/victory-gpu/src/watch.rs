@@ -942,7 +942,6 @@ impl Tracked {
         #[cfg(feature = "diagnostics")]
         let waited = Timed(std::time::Instant::now(), crate::copystat::C::GuardWaitUs);
         let mut g = guards();
-        let mut changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg(feature = "diagnostics")]
         drop(waited);
         #[cfg(feature = "diagnostics")]
@@ -956,18 +955,27 @@ impl Tracked {
                 .copied()
                 .filter(|p| !taken.contains(p))
                 .collect();
-            protect_with_aliases(&mut g, &pages, &others, true, Some(&mut unmapped), |pages| {
+            // Partial pages are copied but stay dirty for a later request.
+            let whole: Vec<usize> = pages
+                .iter()
+                .copied()
+                .filter(|&p| {
+                    (p * PAGE).max(self.start) >= from && ((p + 1) * PAGE).min(self.end) <= to
+                })
+                .collect();
+            protect_with_aliases(&mut g, &whole, &others, true, Some(&mut unmapped), |pages| {
+                let mut changed = self.changed.0.lock().unwrap_or_else(|e| e.into_inner());
                 for &page in pages {
                     changed.remove(&page);
                     taken.insert(page);
                 }
+                set_dirty(self.changed.2, !changed.is_empty());
+                drop(changed);
                 self.changed.taken_many(pages);
             });
             unmapped.sort_unstable();
             push(&mut out, &pages, from, to, &unmapped);
         }
-        set_dirty(self.changed.2, !changed.is_empty());
-        drop(changed);
         drop(g);
         out
     }
@@ -2324,6 +2332,26 @@ pub(crate) mod tests {
         assert!(t.take(p, p + 3 * PAGE).is_empty());
         assert!(t.clean());
         drop(t);
+        free(p);
+    }
+
+    #[test]
+    fn batched_partial_ranges_match_sequential_takes() {
+        let p = pool(3);
+        let ranges = [
+            (p + 100, p + PAGE + 10),
+            (p + PAGE + 20, p + 2 * PAGE),
+            (p + PAGE, p + 3 * PAGE),
+            (p, p),
+            (p, p + 3 * PAGE),
+        ];
+        let sequential = track(p, 3 * PAGE, true).expect("tracked");
+        let expected: Vec<_> = ranges.iter().map(|&(a, b)| sequential.take_split(a, b)).collect();
+        drop(sequential);
+        let batched = track(p, 3 * PAGE, true).expect("tracked");
+        assert_eq!(batched.take_split_many(&ranges), expected);
+        assert!(batched.clean(), "the final range takes the remaining partial page");
+        drop(batched);
         free(p);
     }
 
