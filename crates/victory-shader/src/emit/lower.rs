@@ -23,6 +23,7 @@ use crate::structure::{Atom, Bool, LaneExit, Map, Set, Structured};
 mod atomics;
 mod barriers;
 mod bvh;
+mod f64;
 /// Format loads that move 16-bit halves without the d16 form, a child
 /// module so it shares the emitter's state.
 #[path = "half_views.rs"]
@@ -43,7 +44,8 @@ use mesh::prune_signature;
 pub(crate) use meet::MeetSite;
 use super::bitcode::Rmw;
 use packed::packed_half;
-use round_mode::{round16, round16_after};
+use round_mode::round16;
+pub(super) use round_mode::round16_after;
 #[cfg(any(test, all(windows, feature = "host")))]
 pub(crate) use retry::lower;
 pub(crate) use retry::lower_limited;
@@ -1327,18 +1329,23 @@ impl<'a> Lower<'a> {
         let p = self.x.p;
         let mut inside: HashMap<Value, (usize, usize, usize)> = HashMap::new();
         for b in 0..p.blocks.len() {
-            let mut found = super::wave::sections(p, b);
+            let mut found = super::wave::sections_with_mode(p, b, self.round16[b]);
             if self.x.st.literal {
                 // Keep the original f16 addition order and its rounding.
                 // Sections containing memory operations also keep their LDS barriers.
                 found.retain(|&start, section| {
+                    let count_f64 = section
+                        .shapes
+                        .values()
+                        .any(|s| matches!(s, super::wave::Shape::CountF64Hi(..)));
                     !section
                         .shapes
                         .values()
                         .any(|s| matches!(s, super::wave::Shape::Half(..)))
-                        && p.blocks[b].insts[start + 1..section.end]
-                            .iter()
-                            .all(|i| matches!(i.fields, Fields::Valu(_)))
+                        && p.blocks[b].insts[start + 1..section.end].iter().all(|i| {
+                            matches!(i.fields, Fields::Valu(_))
+                                || (count_f64 && matches!(i.fields, Fields::Sop { .. }))
+                        })
                 });
             }
             for (&start, sec) in &found {
@@ -1419,6 +1426,7 @@ impl<'a> Lower<'a> {
                 (op, src, mask, ident, Some(inclusive))
             }
             Shape::Half(_, src, mask, ident, hi) => return self.reduce_half(src, mask, ident, hi),
+            Shape::CountF64Hi(mask) => return self.count_f64_hi(mask),
         };
         // A mesh program's lanes are numbered as the console's, its host
         // waves are not the console's: only a minimum or maximum (the loop
@@ -1649,6 +1657,7 @@ impl<'a> Lower<'a> {
                     for j in i + 1..end {
                         self.level = self.cur;
                         self.section_inst(b, j, i);
+                        self.mode16 = round16_after(&p.blocks[b].insts[j], self.mode16);
                     }
                     i = end;
                     continue;
@@ -7223,6 +7232,10 @@ impl<'a> Lower<'a> {
                     r = self.s.m.select(c, nan, sat, r);
                 }
                 int(self, r)
+            }
+            "v_cvt_f32_f64" => {
+                let r = self.cvt_f32_f64(inst)?;
+                float(self, r)
             }
             "v_cvt_f32_u32" => {
                 // WARP can misround a full-width uitofp. Each 16-bit
