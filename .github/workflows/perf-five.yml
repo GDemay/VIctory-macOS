@@ -29,6 +29,11 @@ jobs:
       - run: rustup toolchain install 1.98.1 --profile minimal
       - name: Build, verify, and measure original and changed production paths
         run: python3 control/.github/perf/measure.py candidate '${{ matrix.case }}'
+      - name: Native Linux workspace tests and asset policy
+        working-directory: candidate
+        run: |
+          cargo test --workspace --locked > ../results/native-tests.log 2>&1
+          cargo xtask policy > ../results/policy.log 2>&1
       - uses: actions/upload-artifact@v4
         if: always()
         with:

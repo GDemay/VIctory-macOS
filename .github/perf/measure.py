@@ -11,7 +11,7 @@ metadata={'case':case,'base':subprocess.check_output(['git','rev-parse','a31fcca
 # Independent target directories prevent stale cross-worktree artifacts.
 for side,source in [('base',baseline),('patch',patch)]:
  (wd/src).write_text(source)
- env=dict(os.environ,CARGO_TARGET_DIR=str(wd/f'target-{side}'))
+ env=dict(os.environ,CARGO_TARGET_DIR=str(wd/'target'/side))
  build=subprocess.run(['cargo','test','-p','victory-formats','--release','--lib','--no-run','--message-format=json'],cwd=wd,env=env,text=True,capture_output=True)
  (results/f'{side}-build.log').write_text(build.stderr)
  if build.returncode: raise RuntimeError(build.stdout+build.stderr)
