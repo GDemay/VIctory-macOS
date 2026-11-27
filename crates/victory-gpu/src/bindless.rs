@@ -203,6 +203,17 @@ impl Viewed {
         }
     }
 
+    /// A slot whose unordered view reaches `len` bytes of `shadow` at
+    /// `address` (tests: no view or resource needed).
+    #[cfg(test)]
+    pub(crate) fn add_unordered(&self, shadow: &Arc<Shadow>, address: u64, len: u64) {
+        let seen = Seen::Buffer(shadow.clone(), address, len, true);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .count(u32::MAX, &seen, true); // no slot: only textures name theirs
+    }
+
     /// The buffer ranges views reach, merged per host copy and kind
     /// (shader resource, unordered access): copy, start, bytes.
     #[cfg(any(test, feature = "diagnostics"))]
@@ -503,22 +514,25 @@ pub(crate) fn refresh_slot(
 }
 
 /// Heap UAV ranges that may need to refresh a widened SRV after a later
-/// buffer barrier. Computed heap indices do not name ordinary write steps.
-pub(crate) fn widened_writes(viewed: &Viewed) -> Vec<(Arc<Shadow>, usize, usize)> {
+/// buffer barrier, added to `out` (the caller's buffer, kept from barrier to
+/// barrier: the world's heaps have tens of thousands). Computed heap indices
+/// do not name ordinary write steps.
+pub(crate) fn widened_writes_into(viewed: &Viewed, out: &mut Vec<(Arc<Shadow>, usize, usize)>) {
     if !crate::under_wine() {
-        return Vec::new();
+        return;
     }
-    viewed
-        .inner
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .ranges
-        .iter()
-        .filter(|((_, address, end, uav), _)| *uav && address < end)
-        .map(|((_, address, end, _), (_, shadow))| {
-            (shadow.clone(), *address as usize, (end - address) as usize)
-        })
-        .collect()
+    out.extend(
+        viewed
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ranges
+            .iter()
+            .filter(|((_, address, end, uav), _)| *uav && address < end)
+            .map(|((_, address, end, _), (_, shadow))| {
+                (shadow.clone(), *address as usize, (end - address) as usize)
+            }),
+    );
 }
 
 /// Draws and dispatches run with heap-indexing shaders, those of them
