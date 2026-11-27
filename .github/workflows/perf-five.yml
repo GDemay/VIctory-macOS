@@ -1,0 +1,38 @@
+name: Owned performance measurements
+on:
+  push:
+    branches: [codex/perf-five-measurements]
+permissions:
+  contents: read
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {case: linear, ref: codex/perf-five-01}
+          - {case: peek, ref: codex/perf-five-peek}
+          - {case: vlc, ref: codex/perf-five-vlc}
+          - {case: frame, ref: codex/perf-five-frame}
+          - {case: overlap, ref: codex/perf-five-overlap}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: control
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.ref }}
+          path: candidate
+          fetch-depth: 0
+      - run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Build, verify, and measure original and changed production paths
+        run: python3 control/.github/perf/measure.py candidate '${{ matrix.case }}'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-${{ matrix.case }}
+          path: |
+            results/*.log
+            results/*.json
