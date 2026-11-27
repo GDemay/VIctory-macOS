@@ -1105,6 +1105,7 @@ fn differences_in(
 /// [`differences_in`] with custom contents for the structured SRV buffer at
 /// table dword 8.
 #[allow(clippy::too_many_arguments)]
+#[cfg(windows)]
 fn differences_with_buffer(
     wave64: bool,
     words: &[u32],
@@ -2420,6 +2421,7 @@ fn the_predication_test_programs_are_what_their_comments_say() {
 }
 
 #[test]
+#[cfg(windows)]
 fn predicated_early_out_matches_the_console_on_every_gpu() {
     let mut failed = Vec::new();
     for (keep_below, limit) in [(true, 40), (false, 35)] {
@@ -2442,6 +2444,7 @@ fn predicated_early_out_matches_the_console_on_every_gpu() {
 }
 
 #[test]
+#[cfg(windows)]
 fn predicated_diamond_matches_the_console_on_every_gpu() {
     let words = diamond_program();
     let n = native(&words, true, 64, 256);
@@ -2457,6 +2460,7 @@ fn predicated_diamond_matches_the_console_on_every_gpu() {
 }
 
 #[test]
+#[cfg(windows)]
 fn half_add_reduction_across_halves_matches_the_console_on_every_gpu() {
     let words = half_add_reduction();
     let mut failed = Vec::new();
@@ -2484,6 +2488,7 @@ fn half_add_reduction_across_halves_matches_the_console_on_every_gpu() {
 }
 
 #[test]
+#[cfg(windows)]
 fn uniform_buffer_load_loop_across_halves_matches_the_console_on_every_gpu() {
     let words = buffer_load_uniform_loop();
     let mut failed = Vec::new();
@@ -2724,6 +2729,28 @@ fn the_extended_halves_programs_are_what_their_comments_say() {
 }
 
 #[test]
+fn extended_wave64_programs_lower_to_32_lane_waves() {
+    for (words, lds, sizes) in [
+        (early_out_program(true, 40), 256, &[64][..]),
+        (early_out_program(false, 35), 256, &[64]),
+        (diamond_program(), 256, &[64]),
+        (half_add_reduction(), 0, &[32, 64, 96, 128]),
+        (buffer_load_uniform_loop(), 0, &[64, 96, 128]),
+        (skip_guard_uniform_loop_program(20), 0, &[64]),
+        (skip_guard_uniform_loop_program(36), 0, &[64]),
+        (wave_scalarization_loop_program(), 0, &[64, 96, 128]),
+        (trampoline_early_out_mask_program(), 0, &[64]),
+    ] {
+        for &threads in sizes {
+            let n = native(&words, true, threads, lds);
+            let lowered = lowered_with(&n, true, true).expect("extended wave64 program lowers");
+            assert_eq!(lowered.wave_size, Some(32));
+        }
+    }
+}
+
+#[test]
+#[cfg(windows)]
 fn skip_guard_with_uniform_loop_matches_the_console_on_every_gpu() {
     let mut failed = Vec::new();
     for keep_from in [20u32, 36u32] {
@@ -2754,6 +2781,7 @@ fn skip_guard_with_uniform_loop_matches_the_console_on_every_gpu() {
 }
 
 #[test]
+#[cfg(windows)]
 fn wave_scalarization_lockstep_loop_matches_the_console_on_every_gpu() {
     let words = wave_scalarization_loop_program();
     let mut failed = Vec::new();
@@ -2786,6 +2814,7 @@ fn wave_scalarization_lockstep_loop_matches_the_console_on_every_gpu() {
 }
 
 #[test]
+#[cfg(windows)]
 fn trampoline_early_out_and_mask_data_match_the_console_on_every_gpu() {
     let words = trampoline_early_out_mask_program();
     let n = native(&words, true, 64, 0);
@@ -2883,6 +2912,7 @@ fn thread_ticket_relabels_2d_and_partial_tail_groups_bijectively() {
         with_ticket.dxil, without_ticket.dxil,
         "multi-wave console-lane group should emit the TGSM ticket counter"
     );
+    #[cfg(windows)]
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut with_ticket.dxil.clone()).expect("DXIL validation (2-D ticket)");
     }
@@ -2900,10 +2930,18 @@ fn thread_ticket_relabels_2d_and_partial_tail_groups_bijectively() {
     words_40.push(S_ENDPGM);
     let prog_40 = native(&words_40, false, 40, 0);
     let lowered_40 = lower_prog(&prog_40, true);
+    #[cfg(windows)]
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut lowered_40.dxil.clone()).expect("DXIL validation (40-thread partial tail)");
     }
 
+    assert!(!lowered_40.dxil.is_empty());
+    #[cfg(windows)]
+    check_ticket_dispatches(with_ticket, lowered_40);
+}
+
+#[cfg(windows)]
+fn check_ticket_dispatches(with_ticket: lower::Lowered, lowered_40: lower::Lowered) {
     let _one = super::valu_tests::ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|e| e.into_inner());
