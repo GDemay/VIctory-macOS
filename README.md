@@ -117,6 +117,8 @@ tools/macos/victory.sh run --execute <the game's executable>
 
 For now this gets as far as VIctory does on Windows, as the note at the top explains.
 
+To warm the pipelines a previous run requested, or recover a large D3DMetal cache, see [Prewarm a recorded working set](docs/macos.md#prewarm-a-recorded-working-set).
+
 Set `VICTORY_WINDOW_SECONDARY=1` to open the game window on the only non-primary
 display. This requires two extended displays. If VIctory cannot select a single
 secondary display, it leaves the game window hidden. With more than one extra display,
