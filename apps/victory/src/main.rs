@@ -7,6 +7,8 @@ mod census;
 mod inspect;
 #[cfg(windows)]
 mod prebuild;
+#[cfg(windows)]
+mod replay;
 mod run;
 mod shader;
 #[cfg(windows)]
@@ -139,6 +141,10 @@ enum Command {
         #[arg(last = true)]
         title_args: Vec<String>,
     },
+    /// Run a captured frame's GPU work again without the title, with what
+    /// it costs and experiments on it (docs/replay.md).
+    #[cfg(windows)]
+    Replay(Box<replay::Replay>),
     /// Make the host pipelines of every pipeline the title ever created
     /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
     /// driver's cache on disk has them before a run needs one: once per
@@ -265,6 +271,8 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        #[cfg(windows)]
+        Command::Replay(options) => replay::run(*options),
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Config => show_config(),
