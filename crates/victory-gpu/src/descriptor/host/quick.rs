@@ -50,7 +50,7 @@ pub(super) struct ResolvedBuffer {
     /// matching `write_address` / `buffer_range`).
     pub(super) address: u64,
     pub(super) seen: Option<Seen>,
-    epoch: u64,
+    pub(super) epoch: u64,
 }
 
 impl ResolvedBuffer {
@@ -72,6 +72,11 @@ impl ResolvedBuffer {
 fn run_resolve_hooks() {
     super::tests::while_preparing();
     tests::run_local_resolve_hook();
+}
+
+#[cfg(test)]
+pub(super) fn run_topology_hook(publishing: bool) {
+    tests::run_topology_hook(publishing);
 }
 
 /// Resolves a buffer SRV, placed buffer SRV, or constant buffer view outside
@@ -146,7 +151,11 @@ pub(super) fn resolve(view: &View) -> Option<ResolvedBuffer> {
     // SAFETY: `desc.ViewDimension == D3D12_SRV_DIMENSION_BUFFER` verified above.
     let (first_elem, count, struct_stride) = unsafe {
         let b = desc.Anonymous.Buffer;
-        (b.FirstElement, b.NumElements, u64::from(b.StructureByteStride))
+        (
+            b.FirstElement,
+            b.NumElements,
+            u64::from(b.StructureByteStride),
+        )
     };
     let start = address.checked_add(first_elem.checked_mul(element)?)?;
     let len = u64::from(count).checked_mul(element)?;
@@ -229,11 +238,27 @@ mod tests {
     thread_local! {
         static LOCAL_RESOLVE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
+        static TOPOLOGY_HOOK: std::cell::RefCell<Option<(bool, Box<dyn FnOnce()>)>> =
+            const { std::cell::RefCell::new(None) };
     }
 
     pub(super) fn run_local_resolve_hook() {
         let hook = LOCAL_RESOLVE_HOOK.with(|h| h.borrow_mut().take());
         if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) fn run_topology_hook(publishing: bool) {
+        let hook = TOPOLOGY_HOOK.with(|h| {
+            let mut hook = h.borrow_mut();
+            if hook.as_ref().is_some_and(|(when, _)| *when == publishing) {
+                hook.take()
+            } else {
+                None
+            }
+        });
+        if let Some((_, hook)) = hook {
             hook();
         }
     }
@@ -406,8 +431,16 @@ mod tests {
             crate::object::release_ref(buf);
             return;
         };
-        standard.viewed = Arc::new(Viewed::with_options(false, false, crate::ranges::disjoint_spans_enabled()));
-        quick.viewed = Arc::new(Viewed::with_options(true, true, crate::ranges::disjoint_spans_enabled()));
+        standard.viewed = Arc::new(Viewed::with_options(
+            false,
+            false,
+            crate::ranges::disjoint_spans_enabled(),
+        ));
+        quick.viewed = Arc::new(Viewed::with_options(
+            true,
+            true,
+            crate::ranges::disjoint_spans_enabled(),
+        ));
         // Initialize view_addresses buffers before sync so write_buffer_address is verified too.
         assert!(standard.view_addresses().is_some());
         assert!(quick.view_addresses().is_some());
@@ -428,7 +461,11 @@ mod tests {
             "widened buffer count mismatch"
         );
         if crate::under_wine() {
-            assert_eq!(quick.widened_buffers().len(), 2, "float + uint widened copies");
+            assert_eq!(
+                quick.widened_buffers().len(),
+                2,
+                "float + uint widened copies"
+            );
         }
 
         let check_uav_writes = |label: &str| {
@@ -468,7 +505,10 @@ mod tests {
             );
         }
         assert!(!quick.made(1) && !quick.made(10) && !quick.made(15));
-        assert_eq!(quick.widened_buffers().len(), standard.widened_buffers().len());
+        assert_eq!(
+            quick.widened_buffers().len(),
+            standard.widened_buffers().len()
+        );
         check_uav_writes("round 1");
 
         // SAFETY: plain device health check.
@@ -558,17 +598,20 @@ void main(uint3 id : SV_DispatchThreadID) {
         // Slot 3: placed raw buffer SRV starting at +32B (native, dword 8) or +28B (Wine, dword 7).
         let mut placed_raw = [0u32; 16];
         placed_raw[..10].copy_from_slice(&[39, 1, 0x1688, 0, 0, 0, 16, 0, 1, 0]);
-        (placed_raw[10], placed_raw[11]) = (
-            (mem + placed_at) as u32,
-            ((mem + placed_at) >> 32) as u32,
-        );
+        (placed_raw[10], placed_raw[11]) =
+            ((mem + placed_at) as u32, ((mem + placed_at) >> 32) as u32);
         let mut placed_res = [0u32; 14];
         (placed_res[0], placed_res[4]) = (1, 256);
         crate::descriptor::create_placed_srv(null, &placed_res, &placed_raw, at(3));
         // Slot 4: R32G32B32A32_UINT (format 3) on native D3D12 ([1] -> dwords 4, 5, 6), or
         // 3-channel R32G32B32_UINT (format 7, widened under Wine, [1] -> dwords 3, 4, 5).
         let slot4_fmt: u32 = if native { 3 } else { 7 };
-        crate::descriptor::create_srv(null, src, &[slot4_fmt, 1, 0x1688, 0, 0, 0, 8, 0, 0, 0], at(4));
+        crate::descriptor::create_srv(
+            null,
+            src,
+            &[slot4_fmt, 1, 0x1688, 0, 0, 0, 8, 0, 0, 0],
+            at(4),
+        );
         // Slot 5: duplicate of Slot 1 (exercises StagingHeap copy). [3] -> dword 5.
         crate::descriptor::create_srv(null, src, &typed_desc, at(5));
         // Slot 6: output raw UAV.
@@ -582,7 +625,11 @@ void main(uint3 id : SV_DispatchThreadID) {
 
         let run_mode = |quick: bool| -> [u32; 8] {
             let mut heap = HostHeap::new(false, SLOTS).expect("host heap");
-            heap.viewed = Arc::new(Viewed::with_options(quick, quick, crate::ranges::disjoint_spans_enabled()));
+            heap.viewed = Arc::new(Viewed::with_options(
+                quick,
+                quick,
+                crate::ranges::disjoint_spans_enabled(),
+            ));
             heap.sync_slots_bytes_mode(0..SLOTS, start, 32, (start, &title_heap), true, quick);
             let list = host.new_list().expect("list");
             // SAFETY: open list, live heap/root/pso.
@@ -642,7 +689,11 @@ void main(uint3 id : SV_DispatchThreadID) {
         let Some(mut heap) = HostHeap::new(false, 64) else {
             return;
         };
-        heap.viewed = Arc::new(Viewed::with_options(true, true, crate::ranges::disjoint_spans_enabled()));
+        heap.viewed = Arc::new(Viewed::with_options(
+            true,
+            true,
+            crate::ranges::disjoint_spans_enabled(),
+        ));
         let make_buf = || {
             let b = crate::resource::test_buffer(256);
             let (ptr, len) = crate::resource::buffer_bytes(b).expect("buffer bytes");
@@ -685,5 +736,97 @@ void main(uint3 id : SV_DispatchThreadID) {
         drop(heap);
         crate::object::release_ref(buf_a);
         crate::object::release_ref(buf_b);
+    }
+
+    #[test]
+    fn quick_sync_resolves_again_when_the_shadow_mapping_changes() {
+        for publishing in [false, true] {
+            shadow_mapping_change(publishing);
+        }
+    }
+
+    fn shadow_mapping_change(publishing: bool) {
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        let resource = crate::resource::test_buffer(4096);
+        let (start, len) = crate::resource::buffer_bytes(resource).expect("buffer bytes");
+        let start = start as u64;
+        crate::shadow::register(resource as usize, start, len);
+        let outer = crate::shadow::find(start, len).expect("outer shadow");
+        let address = start + 256;
+        let mut records = [0u8; 4 * 32];
+        let heap_start = records.as_mut_ptr() as u64;
+        for i in 0..2 {
+            crate::descriptor::create_cbv(
+                std::ptr::null(),
+                &[address as u32, (address >> 32) as u32, 64, 0],
+                heap_start + 32 * i,
+            );
+        }
+
+        // The record and its generation stay the same, but the innermost
+        // registered buffer changes after the quick candidate was prepared.
+        let inner_key = address as usize;
+        TOPOLOGY_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                publishing,
+                Box::new(move || {
+                    crate::shadow::register(inner_key, address, 256);
+                }),
+            ));
+        });
+        heap.sync_slots_bytes_mode(0..4, heap_start, 32, (heap_start, &records), true, true);
+        assert!(TOPOLOGY_HOOK.with(|hook| hook.borrow().is_none()));
+        let inner = crate::shadow::find(address, 64).expect("inner shadow");
+        assert!(!Arc::ptr_eq(&inner, &outer));
+        let expected = Some((Arc::as_ptr(&inner) as usize, address, 64, false));
+        for index in 0..2 {
+            assert!(heap.kept(index));
+            assert_eq!(heap.viewed.range_at(index), expected);
+        }
+
+        drop(heap);
+        crate::shadow::unregister(inner_key, address);
+        crate::object::release_ref(resource);
+    }
+
+    #[test]
+    fn rewriting_a_view_keeps_its_displaced_arena_slice_for_retirement() {
+        let Some(heap) = HostHeap::new(false, 4) else {
+            return;
+        };
+        let resource = crate::resource::test_buffer(4096);
+        let (start, len) = crate::resource::buffer_bytes(resource).expect("buffer bytes");
+        let start = start as u64;
+        crate::shadow::register(resource as usize, start, len);
+        let (old, old_own) = crate::shadow::for_view(start + 4, 80, 16).expect("old view copy");
+        let (new, new_own) = crate::shadow::for_view(start + 20, 80, 16).expect("new view copy");
+        assert!(old_own && new_own);
+        assert_eq!(
+            windows::core::Interface::as_raw(&old.buffer),
+            windows::core::Interface::as_raw(&new.buffer)
+        );
+        let old = (old.buffer.clone(), HeldSource::Shadow(old));
+        let new = (new.buffer.clone(), HeldSource::Shadow(new));
+        let mut retired = Vec::new();
+
+        heap.keep_batch(vec![(0, Some((old.0, Some(old.1))))], &mut retired);
+        let duplicate = Some((new.0.clone(), Some(new.1.clone())));
+        heap.keep_batch(vec![(0, Some((new.0, Some(new.1))))], &mut retired);
+        assert_eq!(retired.len(), 1);
+        let displaced = retired[0].1.as_ref().expect("old slice retained");
+        assert!(
+            crate::shadow::for_view(start + 4, 80, 16)
+                .is_some_and(|(from_cache, _)| Arc::ptr_eq(displaced, &from_cache))
+        );
+        heap.keep_batch(vec![(0, duplicate)], &mut retired);
+        assert_eq!(
+            retired.len(),
+            1,
+            "unchanged slice needs no duplicate retirement"
+        );
+        drop(heap);
+        crate::object::release_ref(resource);
     }
 }

@@ -52,6 +52,8 @@ impl Seen {
 pub(crate) enum BatchUpdate<'a> {
     /// Already-resolved slot entry (or `None` to clear the slot).
     Resolved(Option<Seen>),
+    /// Prepared buffer view, which must still name the current shadow.
+    Quick(Option<Seen>, u64),
     /// View to resolve via [`seen`] or [`left_kind`] outside the registry lock.
     View(&'a View, bool),
 }
@@ -765,7 +767,7 @@ impl Viewed {
                 None => (index, BatchUpdate::Resolved(None)),
             })
             .collect();
-        self.set_batch_resolved(&converted);
+        self.set_batch_resolved(&converted, &mut Vec::new());
     }
 
     /// Batched slot update accepting both pre-resolved [`Seen`] entries (from
@@ -774,19 +776,24 @@ impl Viewed {
     /// `self.inner`). Applies all slot transitions under one hold of
     /// `self.inner`.
     #[cfg(windows)]
-    pub(crate) fn set_batch_resolved(&self, updates: &[(u32, BatchUpdate<'_>)]) {
+    pub(crate) fn set_batch_resolved(
+        &self,
+        updates: &[(u32, BatchUpdate<'_>)],
+        retry: &mut Vec<u32>,
+    ) {
         if updates.is_empty() {
             return;
         }
         let mut cache: HashMap<(usize, bool), Option<Seen>, Hashing> =
             HashMap::with_hasher(Hashing::new(self.quick_maps));
-        let mut entries: Vec<(u32, Option<Seen>)> = Vec::with_capacity(updates.len());
-        for (index, update) in updates {
-            let entry = match update {
-                BatchUpdate::Resolved(entry) => entry.clone(),
+        let mut entries = Vec::with_capacity(updates.len());
+        for &(index, ref update) in updates {
+            let (entry, quick_epoch) = match update {
+                BatchUpdate::Resolved(entry) => (entry.clone(), None),
+                BatchUpdate::Quick(entry, epoch) => (entry.clone(), Some(*epoch)),
                 BatchUpdate::View(v, made) => {
                     let key = (std::ptr::from_ref(*v) as usize, *made);
-                    cache
+                    let entry = cache
                         .entry(key)
                         .or_insert_with(|| {
                             if *made {
@@ -795,14 +802,21 @@ impl Viewed {
                                 Some(Seen::Left(left_kind(v)))
                             }
                         })
-                        .clone()
+                        .clone();
+                    (entry, None)
                 }
             };
-            entries.push((*index, entry));
+            entries.push((index, entry, quick_epoch));
         }
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let (mut unordered_changed, mut hulls_changed) = (false, false);
-        for (index, entry) in entries {
+        for (index, entry, quick_epoch) in entries {
+            // Unregister changes the epoch before acquiring this lock to evict
+            // the old copy. Do not reinsert an entry after its eviction.
+            if quick_epoch.is_some_and(|epoch| epoch != crate::shadow::lookup_epoch()) {
+                retry.push(index);
+                continue;
+            }
             if let Some(next) = &entry
                 && inner
                     .slots
@@ -2119,7 +2133,7 @@ void main(uint3 id : SV_DispatchThreadID) {
                     (3, BatchUpdate::View(&uav0, true)),
                     (4, BatchUpdate::View(&uav1, true)),
                     (5, BatchUpdate::View(&uav1, false)),
-                ]);
+                ], &mut Vec::new());
             } else {
                 v.set_batch(&[
                     (0, Some(&srv0), true),
@@ -2141,7 +2155,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             v.set_batch_resolved(&[
                 (6, BatchUpdate::Resolved(inner_srv.clone())),
                 (7, BatchUpdate::View(&inner_uav, true)),
-            ]);
+            ], &mut Vec::new());
         }
         for (idx, v) in variants.iter().enumerate() {
             assert_eq!(
@@ -2155,7 +2169,7 @@ void main(uint3 id : SV_DispatchThreadID) {
             v.set_batch_resolved(&[
                 (6, BatchUpdate::Resolved(None)),
                 (7, BatchUpdate::Resolved(None)),
-            ]);
+            ], &mut Vec::new());
         }
         for (idx, v) in variants.iter().enumerate() {
             assert_eq!(

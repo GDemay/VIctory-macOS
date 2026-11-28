@@ -13,6 +13,8 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
 mod quick;
+#[cfg(test)]
+mod sync_acceptance;
 
 use super::paged::Paged;
 use super::{
@@ -1235,8 +1237,12 @@ impl HostHeap {
             // one of its shaders may hold the old descriptor (or read the
             // slot at an index from wrong data): what it views is freed
             // only once that work has run.
-            if let Some((old, _)) = old {
-                crate::host::retire(old);
+            if let Some((old, src)) = old {
+                if let Some(HeldSource::Shadow(slice)) = src {
+                    crate::host::retire_any((old, slice));
+                } else {
+                    crate::host::retire(old);
+                }
             }
         }
     }
@@ -1244,7 +1250,7 @@ impl HostHeap {
     /// Batched [`HostHeap::keep`]: applies all slot updates under one hold of
     /// `self.kept` and pushes displaced host resources into `retired` for the
     /// caller to retire outside locks.
-    fn keep_batch(&self, updates: Vec<(u32, Kept)>, retired: &mut Vec<ID3D12Resource>) {
+    fn keep_batch(&self, updates: Vec<(u32, Kept)>, retired: &mut Vec<RetiredView>) {
         if updates.is_empty() {
             return;
         }
@@ -1270,7 +1276,18 @@ impl HostHeap {
                 };
                 if same_resource {
                     if let (Some(cur), Some((_, new_src))) = (slot.as_mut(), resource) {
-                        cur.1 = new_src;
+                        let same_slice = matches!(
+                            (&cur.1, &new_src),
+                            (Some(HeldSource::Shadow(a)), Some(HeldSource::Shadow(b)))
+                                if std::sync::Arc::ptr_eq(a, b)
+                        );
+                        if !same_slice
+                            && let Some(HeldSource::Shadow(slice)) = std::mem::replace(&mut cur.1, new_src)
+                        {
+                            // Different views can share one arena buffer. The
+                            // old slice cannot be recycled until the GPU retires it.
+                            retired.push((cur.0.clone(), Some(slice)));
+                        }
                     }
                     continue;
                 }
@@ -1292,8 +1309,12 @@ impl HostHeap {
                         left,
                     );
                 }
-                if let Some((old, _)) = old {
-                    retired.push(old);
+                if let Some((old, src)) = old {
+                    let slice = match src {
+                        Some(HeldSource::Shadow(slice)) => Some(slice),
+                        _ => None,
+                    };
+                    retired.push((old, slice));
                 }
             }
         }
@@ -1828,13 +1849,17 @@ impl HostHeap {
             }
         }
 
+        #[cfg(test)]
+        if use_quick {
+            quick::run_topology_hook(false);
+        }
         lap(S::PrepareUs, &mut clock);
         // Initialize the staging heap before acquiring `self.made`.
         let staging = self.staging();
         let host = host();
 
         let mut again: Vec<u32> = Vec::new();
-        let mut retired: Vec<ID3D12Resource> = Vec::new();
+        let mut retired = Vec::new();
 
         {
             let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
@@ -2136,7 +2161,10 @@ impl HostHeap {
                     {
                         viewed_updates.push((
                             index,
-                            crate::bindless::BatchUpdate::Resolved(resolved_buf.seen.clone()),
+                            crate::bindless::BatchUpdate::Quick(
+                                resolved_buf.seen.clone(),
+                                resolved_buf.epoch,
+                            ),
                         ));
                     } else {
                         viewed_updates
@@ -2194,7 +2222,28 @@ impl HostHeap {
             self.keep_batch(kept_updates, &mut retired);
             lap(S::KeepUs, &mut clock);
             if !self.sampler {
-                self.viewed.set_batch_resolved(&viewed_updates);
+                #[cfg(test)]
+                if use_quick {
+                    quick::run_topology_hook(true);
+                }
+                let retry_start = again.len();
+                self.viewed.set_batch_resolved(&viewed_updates, &mut again);
+                let mut retry = again[retry_start..].iter().copied().peekable();
+                if retry.peek().is_some() {
+                    finalize.retain(|&(index, _, _)| {
+                        if retry.peek() == Some(&index) {
+                            retry.next();
+                            // A descriptor has already been copied and kept.
+                            // Force the fallback to replace or clear it without
+                            // ever publishing the unvalidated record as ready.
+                            made[index as usize] = u64::MAX;
+                            self.set_made_nonzero(index, true);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                }
             }
             lap(S::ViewedUs, &mut clock);
             crate::shadow::forget_reads(&forgot_reads);
@@ -3202,6 +3251,9 @@ enum HeldSource {
 
 /// What a slot made by [`make`] holds, if anything.
 type Kept = Option<Held>;
+
+/// An old descriptor's resource and any arena slice it still reads.
+type RetiredView = (ID3D12Resource, Option<std::sync::Arc<crate::shadow::Shadow>>);
 
 /// Buffer views refused so far (diagnostics: the first are logged).
 #[cfg(feature = "diagnostics")]
@@ -4328,12 +4380,12 @@ mod tests {
     }
 
     /// Sets the work the next `prepare` on this thread runs.
-    fn when_preparing(work: impl FnOnce() + Send + 'static) {
+    pub(super) fn when_preparing(work: impl FnOnce() + Send + 'static) {
         WHILE_PREPARING.set(Some(Box::new(work)));
     }
 
     /// Whether this thread's `prepare` ran the work set (or none was set).
-    fn prepared() -> bool {
+    pub(super) fn prepared() -> bool {
         WHILE_PREPARING.with_borrow(Option::is_none)
     }
 
@@ -4916,7 +4968,7 @@ mod tests {
         unsafe { std::slice::from_raw_parts_mut(start as *mut u8, len) }
     }
 
-    fn placed_tex_desc(width: u64, height: u32, format: u32, flags: u32) -> [u32; 14] {
+    pub(super) fn placed_tex_desc(width: u64, height: u32, format: u32, flags: u32) -> [u32; 14] {
         [
             3,
             0,
@@ -4944,7 +4996,7 @@ mod tests {
         desc
     }
 
-    fn placed_tex_srv_desc(va: u64, view_format: u32) -> [u32; 16] {
+    pub(super) fn placed_tex_srv_desc(va: u64, view_format: u32) -> [u32; 16] {
         let mut desc = [0u32; 16];
         desc[0] = view_format;
         desc[1] = 4; // D3D12_SRV_DIMENSION_TEXTURE2D
