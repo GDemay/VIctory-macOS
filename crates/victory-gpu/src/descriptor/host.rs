@@ -2245,6 +2245,10 @@ impl HostHeap {
                     });
                 }
             }
+            #[cfg(test)]
+            if use_quick {
+                sync_acceptance::note_publication(&viewed_updates, &finalize);
+            }
             lap(S::ViewedUs, &mut clock);
             crate::shadow::forget_reads(&forgot_reads);
             // Coalesce `made_nonzero` bit updates per 64-slot word (stale indices
