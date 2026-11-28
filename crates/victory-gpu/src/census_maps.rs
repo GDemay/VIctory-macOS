@@ -386,7 +386,10 @@ mod tests {
         }
         let key: RangeKey = (0x7000_1234_5678, 0x1_0000_0040, 0x1_0000_0140, true);
         assert_eq!(hashing.hash_one(key), state.hash_one(key));
-        assert_eq!(hashing.hash_one(b"sample-key"), state.hash_one(b"sample-key"));
+        assert_eq!(
+            hashing.hash_one(b"sample-key"),
+            state.hash_one(b"sample-key")
+        );
     }
 
     #[test]
@@ -423,7 +426,14 @@ mod tests {
         );
 
         let copy_hashes: Vec<u64> = (0..1usize << 16)
-            .map(|i| fold.hash_one((base_copy + 0x140 * i, 0x1_0000_0000u64, 0x1_0000_0100u64, false)))
+            .map(|i| {
+                fold.hash_one((
+                    base_copy + 0x140 * i,
+                    0x1_0000_0000u64,
+                    0x1_0000_0100u64,
+                    false,
+                ))
+            })
             .collect();
         let (low, high) = distribution(&copy_hashes);
         assert!(

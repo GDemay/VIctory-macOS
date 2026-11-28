@@ -50,7 +50,7 @@ impl Seen {
 /// One slot update submitted to [`Viewed::set_batch_resolved`].
 #[cfg(windows)]
 pub(crate) enum BatchUpdate<'a> {
-    /// Already-resolved slot entry (or `None` to clear the slot).
+    /// Clear a slot's previous entry.
     Clear,
     /// Prepared buffer view, which must still name the current shadow.
     Quick(&'a Option<Seen>, u64),
