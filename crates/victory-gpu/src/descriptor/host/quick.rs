@@ -235,10 +235,12 @@ mod tests {
     use crate::bindless::Viewed;
     use crate::descriptor::host::{HostHeap, host};
 
+    type TopologyHook = (bool, Box<dyn FnOnce()>);
+
     thread_local! {
         static LOCAL_RESOLVE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
-        static TOPOLOGY_HOOK: std::cell::RefCell<Option<(bool, Box<dyn FnOnce()>)>> =
+        static TOPOLOGY_HOOK: std::cell::RefCell<Option<TopologyHook>> =
             const { std::cell::RefCell::new(None) };
     }
 
