@@ -235,199 +235,6 @@ fn refusal(words: &[u32], threads: u32, lds_bytes: u32) -> String {
     }
 }
 
-/// The hand-encoded words are the instructions their comments name.
-#[test]
-fn the_test_programs_are_what_their_comments_say() {
-    let programs: Vec<(Vec<u32>, &[&str])> = vec![
-        (
-            in_halves(),
-            &[
-                "v_mbcnt_lo_u32_b32 v1, -1, 0",
-                "v_mbcnt_hi_u32_b32 v1, -1, v1",
-                "ds_swizzle_b32 v2, v0",
-                "v_xor_b32 v4, 9, v0",
-                "ds_bpermute_b32 v3, v4, v0",
-                "v_writelane_b32 v5, s8, 40",
-                "v_cndmask_b32 v6, 0, 1, s[20:21]",
-                "v_mov_b32 v7, v0 quad_perm:[1,0,3,2]",
-                "buffer_store_dword v7, v16, s[40:43], 0 offen offset:24",
-            ],
-        ),
-        (
-            sum_after_a_loop_lanes_leave(),
-            &[
-                "v_and_b32 v5, 3, v0",
-                "v_mov_b32 v6, 0",
-                "s_mov_b64 s[4:5], exec",
-                "v_cmp_lt_u32 vcc, v6, v5",
-                "s_and_b64 exec, exec, vcc",
-                "s_cbranch_execz",
-                "v_add_nc_u32 v6, 1, v6",
-                "s_branch",
-                "s_mov_b64 exec, s[4:5]",
-                "v_cvt_f32_u32 v3, v6",
-            ],
-        ),
-        (
-            loops_sharing_a_latch(),
-            &[
-                "s_add_u32 s22, s22, 1",
-                "s_cmp_lt_u32 s22, 3",
-                "s_add_u32 s20, s20, 1",
-                "s_cmp_gt_u32 s20, 2",
-                "s_mov_b32 s22, 0",
-                "s_add_u32 s21, s21, 1",
-                "v_mov_b32 v1, s21",
-            ],
-        ),
-        (
-            dpp_row_mask(),
-            &[
-                "v_mov_b32 v7, -1",
-                "v_mov_b32 v7, v0 quad_perm:[1,0,3,2] row_mask:0xc",
-                "buffer_store_dword v7, v16, s[40:43], 0 offen",
-            ],
-        ),
-        (
-            first_lane_of_the_thread_id(),
-            &[
-                "v_mbcnt_lo_u32_b32 v1, -1, 0",
-                "v_readfirstlane_b32 s12, v0",
-                "v_mov_b32 v2, s12",
-            ],
-        ),
-        (
-            first_lane_of_a_buffer_load(3),
-            &[
-                "s_load_dwordx4 s[44:47], s[4:5], 0x000020",
-                "v_mov_b32 v3, 4",
-                "buffer_load_dword v4, v3, s[44:47], 0 offen",
-                "s_waitcnt vmcnt(0)",
-                "v_readfirstlane_b32 s12, v4",
-                "v_mov_b32 v5, s12",
-            ],
-        ),
-        (
-            first_lane_alike(),
-            &[
-                "v_lshrrev_b32 v2, 6, v0",
-                "v_readfirstlane_b32 s12, v2",
-                "v_mov_b32 v3, s12",
-                "buffer_store_dword v1, v16, s[40:43], 0 offen offset:4",
-            ],
-        ),
-        (
-            first_active_lane(),
-            &["s_ff1_i32_b64 s12, exec", "v_mov_b32 v1, s12"],
-        ),
-        (
-            lanes_below(100),
-            &[
-                "v_cmp_gt_u32 vcc, lit(0x00000064), v0",
-                "s_bcnt1_i32_b64 s12, vcc",
-                "v_mov_b32 v2, vcc_hi",
-                "v_mbcnt_lo_u32_b32 v3, vcc_lo, 0",
-                "v_mbcnt_hi_u32_b32 v3, vcc_hi, v3",
-                "buffer_store_dword v3, v16, s[40:43], 0 offen offset:8",
-            ],
-        ),
-        (
-            lanes_below_in_a_loop(),
-            &[
-                "s_mov_b32 s20, 0",
-                "v_cmp_gt_u32 vcc, 40, v0",
-                "s_add_u32 s20, s20, 1",
-                "s_cmp_lt_u32 s20, 2",
-                "s_cbranch_scc1",
-            ],
-        ),
-        (
-            lane_reads(40, 33),
-            &[
-                "v_readlane_b32 s12, v0, 40",
-                "v_readlane_b32 s14, v0, s13",
-                "v_mov_b32 v1, s12",
-                "v_mov_b32 v2, s14",
-                "buffer_store_dword v2, v16, s[40:43], 0 offen offset:4",
-            ],
-        ),
-        (
-            reduction(V_ADD_F32, 0x80, 0x7E06_0D00),
-            &[
-                "v_cvt_f32_u32 v3, v0",
-                "s_or_saveexec_b64 s[12:13], -1",
-                "v_cndmask_b32 v1, 0, v3, s[12:13]",
-                "v_permlanex16_b32 v2, v1, 0, 0",
-                "v_add_f32 v1, v2, v1",
-                "v_readlane_b32 s14, v1, 32",
-                "v_add_f32 v1, s14, v1",
-                "v_readlane_b32 s15, v1, 0",
-                "s_mov_b64 exec, s[12:13]",
-                "v_mov_b32 v1, s15",
-            ],
-        ),
-        (
-            reduction(V_MIN_U32, 0xC1, V_MOV_V3_V0),
-            &[
-                "v_mov_b32 v3, v0",
-                "v_cndmask_b32 v1, -1, v3, s[12:13]",
-                "v_min_u32 v1, v2, v1",
-                "v_min_u32 v1, s14, v1",
-            ],
-        ),
-        (
-            reduction(V_MAX_U32, 0x80, V_MOV_V3_V0),
-            &["v_max_u32 v1, v2, v1", "v_max_u32 v1, s14, v1"],
-        ),
-        (
-            exclusive_prefix(),
-            &[
-                "s_or_saveexec_b64 s[0:1], -1",
-                "v_cndmask_b32 v1, 0, v0, s[0:1]",
-                "v_add_nc_u32 v1, v1, v1 row_shr:8",
-                "v_readlane_b32 s2, v1, 47",
-                "v_mov_b32 v3, v1 row_shr:1",
-                "s_mov_b64 exec, -2",
-                "v_mov_b32 v2, v3",
-                "s_mov_b64 exec, s[0:1]",
-                "buffer_store_dword v2, v16, s[40:43], 0 offen",
-            ],
-        ),
-        (
-            in_a_loop(&[0xD760_000C, 0x0001_5100], 12, Count::Two),
-            &[
-                "v_readlane_b32 s12, v0, 40",
-                "s_add_u32 s20, s20, 1",
-                "s_cmp_lt_u32 s20, 2",
-                "s_cbranch_scc1",
-                "v_mov_b32 v1, s12",
-            ],
-        ),
-        (
-            in_a_loop(&[0x7D88_00A8, 0xBE8C_106A], 12, Count::FirstLane),
-            &[
-                "v_readfirstlane_b32 s21, v0",
-                "v_cmp_gt_u32 vcc, 40, v0",
-                "s_bcnt1_i32_b64 s12, vcc",
-                "s_cmp_lt_u32 s20, s21",
-                "s_cbranch_scc1",
-            ],
-        ),
-    ];
-    for (words, wants) in programs {
-        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let all = gfx10::decode(&code)
-            .expect("decodes")
-            .iter()
-            .map(|i| i.text(true))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for want in wants {
-            assert!(all.contains(want), "{want:?} not in:\n{all}");
-        }
-    }
-}
-
 /// In halves the program declares waves of 32; without, the console's 64.
 #[test]
 fn a_wave64_program_reading_lanes_declares_32_lane_waves_in_halves() {
@@ -4453,6 +4260,354 @@ fn a_first_lane_read_of_a_multiply_accumulate_matches_the_console_on_every_gpu()
         }
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// Two first-lane reads of values the same in every lane that makes them,
+/// in an `s_and_saveexec_b64` region whose EXEC is `mask_words`'s:
+/// `v4 = 42` then `v4 = 1.0 + v4` (1.0, read into `s12`) and `v5 = 1.0 + v4`
+/// (2.0, read into `s13`). The lanes outside the region never make `v4` or
+/// `v5`. Every lane stores `v2` and `v6`, which take the two reads after
+/// EXEC is restored (every lane), or with `inside` in the region (its lanes
+/// only, the others keeping 0: reads only the lanes that ran them see).
+/// `with_mbcnt`: a `v_mbcnt` first, so the program runs in halves on a
+/// 32-lane host whatever else it holds.
+fn alike_reads_in_a_region(mask_words: &[u32], with_mbcnt: bool, inside: bool) -> Vec<u32> {
+    let mut w = PROLOGUE.to_vec();
+    w.extend([
+        0x3420_0085, // v_lshlrev_b32 v16, 5, v0
+        0x7E04_0280, // v_mov_b32 v2, 0
+        0x7E0C_0280, // v_mov_b32 v6, 0
+    ]);
+    if with_mbcnt {
+        w.extend([
+            0xD765_0001,
+            0x0001_00C1, // v_mbcnt_lo_u32_b32 v1, -1, 0
+        ]);
+    }
+    w.extend(mask_words);
+    let moves = [
+        0x7E04_020C, // v_mov_b32 v2, s12
+        0x7E0C_020D, // v_mov_b32 v6, s13
+    ];
+    w.extend([
+        0xBE80_246A,                               // s_and_saveexec_b64 s[0:1], vcc
+        0xBF88_0005 + 2 * u32::from(inside), // s_cbranch_execz (past the region)
+        0x7E08_02AA,                               // v_mov_b32 v4, 42
+        0x0608_08F2,                               // v_add_f32 v4, 1.0, v4
+        0x7E18_0504,                               // v_readfirstlane_b32 s12, v4
+        0x060A_08F2,                               // v_add_f32 v5, 1.0, v4
+        0x7E1A_0505,                               // v_readfirstlane_b32 s13, v5
+    ]);
+    if inside {
+        w.extend(moves);
+    }
+    w.push(0xBEFE_0400); // s_mov_b64 exec, s[0:1]
+    if !inside {
+        w.extend(moves);
+    }
+    w.extend(store(2, 0));
+    w.extend(store(6, 4));
+    w.push(S_ENDPGM);
+    w
+}
+
+#[test]
+fn the_alike_read_programs_are_what_their_comments_say() {
+    let words = alike_reads_in_a_region(&MASK_LANES_40_41, true, false);
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let all = gfx10::decode(&code)
+        .expect("decodes")
+        .iter()
+        .map(|i| i.text(true))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for want in [
+        "v_mov_b32 v6, 0",
+        "v_mbcnt_lo_u32_b32 v1, -1, 0",
+        "v_cmp_eq_u32 vcc, 20, v3",
+        "s_and_saveexec_b64 s[0:1], vcc",
+        "s_cbranch_execz",
+        "v_mov_b32 v4, 42",
+        "v_add_f32 v4, 1.0, v4",
+        "v_readfirstlane_b32 s12, v4",
+        "v_add_f32 v5, 1.0, v4",
+        "v_readfirstlane_b32 s13, v5",
+        "s_mov_b64 exec, s[0:1]",
+        "v_mov_b32 v2, s12",
+        "v_mov_b32 v6, s13",
+    ] {
+        assert!(all.contains(want), "{want:?} not in:\n{all}");
+    }
+}
+
+/// Lanes 8 and 9 of every console wave (its lower half).
+const MASK_WAVE_LANES_8_9: [u32; 2] = [
+    0x3606_00BE, // v_and_b32 v3, 62, v0
+    0x7D84_0688, // v_cmp_eq_u32 vcc, 8, v3
+];
+
+/// Lanes 40 and 41 of every console wave (its upper half).
+const MASK_WAVE_LANES_40_41: [u32; 2] = [
+    0x3606_00BE, // v_and_b32 v3, 62, v0
+    0x7D84_06A8, // v_cmp_eq_u32 vcc, 40, v3
+];
+
+/// A first-lane read of a value the same in every lane that makes it reads
+/// a lane that made it. The halves run such a region in every lane, under a
+/// predicate: the host wave's first lane may be outside it and hold an old
+/// value (the read took that one), and a half with no lane of the region
+/// holds none at all (it takes the other half's). `inside`: only the
+/// region's lanes see the reads, each half making them by itself
+/// (`first_lane::read_alone`), from a lane of the region too.
+#[cfg(windows)]
+#[test]
+fn a_first_lane_read_of_an_alike_value_in_a_region_matches_the_console_on_every_gpu() {
+    let mut failed = Vec::new();
+    type InRegion = fn(u32) -> bool;
+    let masks: [(&str, &[u32; 2], InRegion); 3] = [
+        ("lower_8_9", &MASK_WAVE_LANES_8_9, |t| t & 62 == 8),
+        ("upper_40_41", &MASK_WAVE_LANES_40_41, |t| t & 62 == 40),
+        ("both_12_44", &MASK_LANES_12_44, |t| t & 31 == 12),
+    ];
+    for (label, mask, in_region) in masks {
+        for with_mbcnt in [false, true] {
+            for threads in [64, 128] {
+                for inside in [false, true] {
+                    let words = alike_reads_in_a_region(mask, with_mbcnt, inside);
+                    let want: Vec<u32> = (0..threads)
+                        .flat_map(|t| {
+                            if !inside || in_region(t) {
+                                [1.0f32.to_bits(), 2.0f32.to_bits()]
+                            } else {
+                                [0, 0]
+                            }
+                        })
+                        .collect();
+                    let found = differences_with_buffer(
+                        true, &words, threads, 2, &want, 0, false, false, &[0; 4],
+                    );
+                    failed.extend(found.into_iter().map(|m| {
+                        format!("{label}(mbcnt={with_mbcnt}, inside={inside}) {threads} threads: {m}")
+                    }));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// The masks are what their comments say.
+#[test]
+fn the_wave_lane_masks_are_what_their_comments_say() {
+    for (mask, want) in [
+        (&MASK_WAVE_LANES_8_9, "v_cmp_eq_u32 vcc, 8, v3"),
+        (&MASK_WAVE_LANES_40_41, "v_cmp_eq_u32 vcc, 40, v3"),
+    ] {
+        let code: Vec<u8> = mask
+            .iter()
+            .chain(&[S_ENDPGM])
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let text: Vec<String> = gfx10::decode(&code)
+            .expect("decodes")
+            .iter()
+            .map(|i| i.text(true))
+            .collect();
+        assert_eq!(text[..2], ["v_and_b32 v3, 62, v0", want]);
+    }
+}
+
+/// The hand-encoded words are the instructions their comments name.
+#[test]
+fn the_test_programs_are_what_their_comments_say() {
+    let programs: Vec<(Vec<u32>, &[&str])> = vec![
+        (
+            in_halves(),
+            &[
+                "v_mbcnt_lo_u32_b32 v1, -1, 0",
+                "v_mbcnt_hi_u32_b32 v1, -1, v1",
+                "ds_swizzle_b32 v2, v0",
+                "v_xor_b32 v4, 9, v0",
+                "ds_bpermute_b32 v3, v4, v0",
+                "v_writelane_b32 v5, s8, 40",
+                "v_cndmask_b32 v6, 0, 1, s[20:21]",
+                "v_mov_b32 v7, v0 quad_perm:[1,0,3,2]",
+                "buffer_store_dword v7, v16, s[40:43], 0 offen offset:24",
+            ],
+        ),
+        (
+            sum_after_a_loop_lanes_leave(),
+            &[
+                "v_and_b32 v5, 3, v0",
+                "v_mov_b32 v6, 0",
+                "s_mov_b64 s[4:5], exec",
+                "v_cmp_lt_u32 vcc, v6, v5",
+                "s_and_b64 exec, exec, vcc",
+                "s_cbranch_execz",
+                "v_add_nc_u32 v6, 1, v6",
+                "s_branch",
+                "s_mov_b64 exec, s[4:5]",
+                "v_cvt_f32_u32 v3, v6",
+            ],
+        ),
+        (
+            loops_sharing_a_latch(),
+            &[
+                "s_add_u32 s22, s22, 1",
+                "s_cmp_lt_u32 s22, 3",
+                "s_add_u32 s20, s20, 1",
+                "s_cmp_gt_u32 s20, 2",
+                "s_mov_b32 s22, 0",
+                "s_add_u32 s21, s21, 1",
+                "v_mov_b32 v1, s21",
+            ],
+        ),
+        (
+            dpp_row_mask(),
+            &[
+                "v_mov_b32 v7, -1",
+                "v_mov_b32 v7, v0 quad_perm:[1,0,3,2] row_mask:0xc",
+                "buffer_store_dword v7, v16, s[40:43], 0 offen",
+            ],
+        ),
+        (
+            first_lane_of_the_thread_id(),
+            &[
+                "v_mbcnt_lo_u32_b32 v1, -1, 0",
+                "v_readfirstlane_b32 s12, v0",
+                "v_mov_b32 v2, s12",
+            ],
+        ),
+        (
+            first_lane_of_a_buffer_load(3),
+            &[
+                "s_load_dwordx4 s[44:47], s[4:5], 0x000020",
+                "v_mov_b32 v3, 4",
+                "buffer_load_dword v4, v3, s[44:47], 0 offen",
+                "s_waitcnt vmcnt(0)",
+                "v_readfirstlane_b32 s12, v4",
+                "v_mov_b32 v5, s12",
+            ],
+        ),
+        (
+            first_lane_alike(),
+            &[
+                "v_lshrrev_b32 v2, 6, v0",
+                "v_readfirstlane_b32 s12, v2",
+                "v_mov_b32 v3, s12",
+                "buffer_store_dword v1, v16, s[40:43], 0 offen offset:4",
+            ],
+        ),
+        (
+            first_active_lane(),
+            &["s_ff1_i32_b64 s12, exec", "v_mov_b32 v1, s12"],
+        ),
+        (
+            lanes_below(100),
+            &[
+                "v_cmp_gt_u32 vcc, lit(0x00000064), v0",
+                "s_bcnt1_i32_b64 s12, vcc",
+                "v_mov_b32 v2, vcc_hi",
+                "v_mbcnt_lo_u32_b32 v3, vcc_lo, 0",
+                "v_mbcnt_hi_u32_b32 v3, vcc_hi, v3",
+                "buffer_store_dword v3, v16, s[40:43], 0 offen offset:8",
+            ],
+        ),
+        (
+            lanes_below_in_a_loop(),
+            &[
+                "s_mov_b32 s20, 0",
+                "v_cmp_gt_u32 vcc, 40, v0",
+                "s_add_u32 s20, s20, 1",
+                "s_cmp_lt_u32 s20, 2",
+                "s_cbranch_scc1",
+            ],
+        ),
+        (
+            lane_reads(40, 33),
+            &[
+                "v_readlane_b32 s12, v0, 40",
+                "v_readlane_b32 s14, v0, s13",
+                "v_mov_b32 v1, s12",
+                "v_mov_b32 v2, s14",
+                "buffer_store_dword v2, v16, s[40:43], 0 offen offset:4",
+            ],
+        ),
+        (
+            reduction(V_ADD_F32, 0x80, 0x7E06_0D00),
+            &[
+                "v_cvt_f32_u32 v3, v0",
+                "s_or_saveexec_b64 s[12:13], -1",
+                "v_cndmask_b32 v1, 0, v3, s[12:13]",
+                "v_permlanex16_b32 v2, v1, 0, 0",
+                "v_add_f32 v1, v2, v1",
+                "v_readlane_b32 s14, v1, 32",
+                "v_add_f32 v1, s14, v1",
+                "v_readlane_b32 s15, v1, 0",
+                "s_mov_b64 exec, s[12:13]",
+                "v_mov_b32 v1, s15",
+            ],
+        ),
+        (
+            reduction(V_MIN_U32, 0xC1, V_MOV_V3_V0),
+            &[
+                "v_mov_b32 v3, v0",
+                "v_cndmask_b32 v1, -1, v3, s[12:13]",
+                "v_min_u32 v1, v2, v1",
+                "v_min_u32 v1, s14, v1",
+            ],
+        ),
+        (
+            reduction(V_MAX_U32, 0x80, V_MOV_V3_V0),
+            &["v_max_u32 v1, v2, v1", "v_max_u32 v1, s14, v1"],
+        ),
+        (
+            exclusive_prefix(),
+            &[
+                "s_or_saveexec_b64 s[0:1], -1",
+                "v_cndmask_b32 v1, 0, v0, s[0:1]",
+                "v_add_nc_u32 v1, v1, v1 row_shr:8",
+                "v_readlane_b32 s2, v1, 47",
+                "v_mov_b32 v3, v1 row_shr:1",
+                "s_mov_b64 exec, -2",
+                "v_mov_b32 v2, v3",
+                "s_mov_b64 exec, s[0:1]",
+                "buffer_store_dword v2, v16, s[40:43], 0 offen",
+            ],
+        ),
+        (
+            in_a_loop(&[0xD760_000C, 0x0001_5100], 12, Count::Two),
+            &[
+                "v_readlane_b32 s12, v0, 40",
+                "s_add_u32 s20, s20, 1",
+                "s_cmp_lt_u32 s20, 2",
+                "s_cbranch_scc1",
+                "v_mov_b32 v1, s12",
+            ],
+        ),
+        (
+            in_a_loop(&[0x7D88_00A8, 0xBE8C_106A], 12, Count::FirstLane),
+            &[
+                "v_readfirstlane_b32 s21, v0",
+                "v_cmp_gt_u32 vcc, 40, v0",
+                "s_bcnt1_i32_b64 s12, vcc",
+                "s_cmp_lt_u32 s20, s21",
+                "s_cbranch_scc1",
+            ],
+        ),
+    ];
+    for (words, wants) in programs {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let all = gfx10::decode(&code)
+            .expect("decodes")
+            .iter()
+            .map(|i| i.text(true))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for want in wants {
+            assert!(all.contains(want), "{want:?} not in:\n{all}");
+        }
+    }
 }
 
 /// Each lane counts to the low two bits of its thread id in a loop it leaves
