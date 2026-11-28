@@ -51,9 +51,11 @@ impl Seen {
 #[cfg(windows)]
 pub(crate) enum BatchUpdate<'a> {
     /// Already-resolved slot entry (or `None` to clear the slot).
-    Resolved(Option<Seen>),
+    Clear,
     /// Prepared buffer view, which must still name the current shadow.
-    Quick(Option<Seen>, u64),
+    Quick(&'a Option<Seen>, u64),
+    #[cfg(test)]
+    TestResolved(&'a Option<Seen>),
     /// View to resolve via [`seen`] or [`left_kind`] outside the registry lock.
     View(&'a View, bool),
 }
@@ -764,19 +766,17 @@ impl Viewed {
             .iter()
             .map(|&(index, view, made)| match view {
                 Some(v) => (index, BatchUpdate::View(v, made)),
-                None => (index, BatchUpdate::Resolved(None)),
+                None => (index, BatchUpdate::Clear),
             })
             .collect();
-        self.set_batch_resolved(&converted, &mut Vec::new());
+        self.set_batch_resolved::<false>(&converted, &mut Vec::new());
     }
 
-    /// Batched slot update accepting both pre-resolved [`Seen`] entries (from
-    /// `descriptor::host::quick`, avoiding redundant shadow lookups) and
-    /// unresolved [`View`] references (resolved and deduplicated outside
-    /// `self.inner`). Applies all slot transitions under one hold of
-    /// `self.inner`.
+    /// Batched slot update accepting pre-resolved entries and view references.
+    /// Resolves the latter once per unique view, then applies all transitions
+    /// under one hold of `self.inner`.
     #[cfg(windows)]
-    pub(crate) fn set_batch_resolved(
+    pub(crate) fn set_batch_resolved<const QUICK: bool>(
         &self,
         updates: &[(u32, BatchUpdate<'_>)],
         retry: &mut Vec<u32>,
@@ -784,36 +784,20 @@ impl Viewed {
         if updates.is_empty() {
             return;
         }
-        let mut cache: HashMap<(usize, bool), Option<Seen>, Hashing> =
-            HashMap::with_hasher(Hashing::new(self.quick_maps));
-        let mut entries = Vec::with_capacity(updates.len());
-        for &(index, ref update) in updates {
-            let (entry, quick_epoch) = match update {
-                BatchUpdate::Resolved(entry) => (entry.clone(), None),
-                BatchUpdate::Quick(entry, epoch) => (entry.clone(), Some(*epoch)),
-                BatchUpdate::View(v, made) => {
-                    let key = (std::ptr::from_ref(*v) as usize, *made);
-                    let entry = cache
-                        .entry(key)
-                        .or_insert_with(|| {
-                            if *made {
-                                seen(v)
-                            } else {
-                                Some(Seen::Left(left_kind(v)))
-                            }
-                        })
-                        .clone();
-                    (entry, None)
-                }
-            };
-            entries.push((index, entry, quick_epoch));
-        }
+        let entries = if self.quick_maps {
+            resolve_updates(updates, Hashing::Fold)
+        } else {
+            resolve_updates(updates, std::hash::RandomState::new())
+        };
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let (mut unordered_changed, mut hulls_changed) = (false, false);
-        for (index, entry, quick_epoch) in entries {
+        for (&(index, ref update), entry) in updates.iter().zip(entries) {
             // Unregister changes the epoch before acquiring this lock to evict
             // the old copy. Do not reinsert an entry after its eviction.
-            if quick_epoch.is_some_and(|epoch| epoch != crate::shadow::lookup_epoch()) {
+            if QUICK
+                && let BatchUpdate::Quick(_, epoch) = update
+                && *epoch != crate::shadow::lookup_epoch()
+            {
                 retry.push(index);
                 continue;
             }
@@ -925,6 +909,37 @@ impl Viewed {
             .textures
             .is_empty()
     }
+}
+
+/// Resolve each unresolved view once. Quick entries borrow the page's
+/// prepared data so each slot needs just one reference for the register.
+fn resolve_updates(
+    updates: &[(u32, BatchUpdate<'_>)],
+    hasher: impl std::hash::BuildHasher,
+) -> Vec<Option<Seen>> {
+    let mut cache = HashMap::with_hasher(hasher);
+    updates
+        .iter()
+        .map(|(_, update)| match update {
+            BatchUpdate::Clear => None,
+            BatchUpdate::Quick(entry, _) => (*entry).clone(),
+            #[cfg(test)]
+            BatchUpdate::TestResolved(entry) => (*entry).clone(),
+            BatchUpdate::View(v, made) => {
+                let key = (std::ptr::from_ref(*v) as usize, *made);
+                cache
+                    .entry(key)
+                    .or_insert_with(|| {
+                        if *made {
+                            seen(v)
+                        } else {
+                            Some(Seen::Left(left_kind(v)))
+                        }
+                    })
+                    .clone()
+            }
+        })
+        .collect()
 }
 
 /// What a made view reads that title memory feeds.
@@ -2126,10 +2141,10 @@ void main(uint3 id : SV_DispatchThreadID) {
         // Mix pre-resolved SRVs, unresolved views, duplicates, and clears.
         for (idx, v) in variants.iter().enumerate() {
             if idx % 2 == 1 {
-                v.set_batch_resolved(&[
-                    (0, BatchUpdate::Resolved(resolved_srv0.clone())),
-                    (1, BatchUpdate::Resolved(resolved_srv0.clone())),
-                    (2, BatchUpdate::Resolved(resolved_srv1.clone())),
+                v.set_batch_resolved::<false>(&[
+                    (0, BatchUpdate::TestResolved(&resolved_srv0)),
+                    (1, BatchUpdate::TestResolved(&resolved_srv0)),
+                    (2, BatchUpdate::TestResolved(&resolved_srv1)),
                     (3, BatchUpdate::View(&uav0, true)),
                     (4, BatchUpdate::View(&uav1, true)),
                     (5, BatchUpdate::View(&uav1, false)),
@@ -2152,8 +2167,8 @@ void main(uint3 id : SV_DispatchThreadID) {
         let inner_uav = View::Unordered(bufs[0] as usize, 0, Some([39, 1, 8, 0, 16, 0, 0, 0, 1, 0]));
         let gens_before: Vec<u64> = variants.iter().map(Viewed::hull_generation).collect();
         for v in &variants {
-            v.set_batch_resolved(&[
-                (6, BatchUpdate::Resolved(inner_srv.clone())),
+            v.set_batch_resolved::<false>(&[
+                (6, BatchUpdate::TestResolved(&inner_srv)),
                 (7, BatchUpdate::View(&inner_uav, true)),
             ], &mut Vec::new());
         }
@@ -2166,9 +2181,9 @@ void main(uint3 id : SV_DispatchThreadID) {
         }
         assert_all_equal("after interior set_batch_resolved");
         for v in &variants {
-            v.set_batch_resolved(&[
-                (6, BatchUpdate::Resolved(None)),
-                (7, BatchUpdate::Resolved(None)),
+            v.set_batch_resolved::<false>(&[
+                (6, BatchUpdate::Clear),
+                (7, BatchUpdate::Clear),
             ], &mut Vec::new());
         }
         for (idx, v) in variants.iter().enumerate() {

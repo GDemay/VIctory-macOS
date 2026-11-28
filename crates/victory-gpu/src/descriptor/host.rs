@@ -1675,7 +1675,11 @@ impl HostHeap {
                 }
             }
             if !stale.is_empty() {
-                self.mirror_synced_batch(&stale, at, quick_views);
+                if quick_views && !self.sampler {
+                    self.mirror_synced_batch::<true>(&stale, at);
+                } else {
+                    self.mirror_synced_batch::<false>(&stale, at);
+                }
             }
         } else {
             let legacy_fast = sync_fast_enabled();
@@ -1761,11 +1765,15 @@ impl HostHeap {
     /// deduplicating `prepare` and descriptor creation via [`StagingHeap`] +
     /// `CopyDescriptorsSimple`.
     ///
-    /// When `quick_views` is enabled on a view heap, each unique buffer-SRV or
+    /// When quick sync is enabled on a view heap, each unique buffer-SRV or
     /// CBV record in the page is resolved once outside `self.made` via
     /// [`quick::resolve`], avoiding repeated shadow and bindless lookups under
     /// `self.made`.
-    fn mirror_synced_batch(&self, stale: &[(u32, [u32; 3])], at: impl Fn(u32) -> u64, quick_views: bool) {
+    fn mirror_synced_batch<const QUICK: bool>(
+        &self,
+        stale: &[(u32, [u32; 3])],
+        at: impl Fn(u32) -> u64,
+    ) {
         let _making = MakeTimer(std::time::Instant::now(), stale.len() as u64);
         struct CachedTemplate {
             src: D3D12_CPU_DESCRIPTOR_HANDLE,
@@ -1774,37 +1782,48 @@ impl HostHeap {
             quick: bool,
         }
 
-        let use_quick = quick_views && !self.sampler;
-        let mut unique_keys: Vec<u64> = Vec::new();
-        let mut key_counts: Vec<u32> = Vec::new();
-        let mut key_to_idx: HashMap<u64, usize, crate::census_maps::Hashing> =
-            HashMap::with_capacity_and_hasher(
-                stale.len(),
-                crate::census_maps::Hashing::new(use_quick),
-            );
-        let mut slot_key_idx: Vec<Option<usize>> = Vec::with_capacity(stale.len());
+        type KeyIndex = (Vec<u64>, Vec<u32>, Vec<Option<usize>>);
 
-        for &(_, [tag, view, generation]) in stale {
-            if tag == VIEW_TAG && generation != 0 {
-                let key = u64::from(generation) << 32 | u64::from(view);
-                let idx = match key_to_idx.get(&key) {
-                    Some(&idx) => {
-                        key_counts[idx] += 1;
-                        idx
-                    }
-                    None => {
-                        let idx = unique_keys.len();
-                        unique_keys.push(key);
-                        key_counts.push(1);
-                        key_to_idx.insert(key, idx);
-                        idx
-                    }
-                };
-                slot_key_idx.push(Some(idx));
-            } else {
-                slot_key_idx.push(None);
+        fn key_index(
+            stale: &[(u32, [u32; 3])],
+            mut key_to_idx: HashMap<u64, usize, impl std::hash::BuildHasher>,
+        ) -> KeyIndex {
+            let mut unique_keys: Vec<u64> = Vec::new();
+            let mut key_counts: Vec<u32> = Vec::new();
+            let mut slot_key_idx: Vec<Option<usize>> = Vec::with_capacity(stale.len());
+            for &(_, [tag, view, generation]) in stale {
+                if tag == VIEW_TAG && generation != 0 {
+                    let key = u64::from(generation) << 32 | u64::from(view);
+                    let idx = match key_to_idx.get(&key) {
+                        Some(&idx) => {
+                            key_counts[idx] += 1;
+                            idx
+                        }
+                        None => {
+                            let idx = unique_keys.len();
+                            unique_keys.push(key);
+                            key_counts.push(1);
+                            key_to_idx.insert(key, idx);
+                            idx
+                        }
+                    };
+                    slot_key_idx.push(Some(idx));
+                } else {
+                    slot_key_idx.push(None);
+                }
             }
+
+            (unique_keys, key_counts, slot_key_idx)
         }
+
+        let (unique_keys, key_counts, slot_key_idx) = if QUICK {
+            key_index(
+                stale,
+                HashMap::with_capacity_and_hasher(stale.len(), crate::census_maps::Hashing::Fold),
+            )
+        } else {
+            key_index(stale, HashMap::new())
+        };
 
         use crate::descriptor::{SyncStat as S, sync_stat};
         let lap = |stat: S, since: &mut std::time::Instant| {
@@ -1816,20 +1835,20 @@ impl HostHeap {
         let at_once = placed_at_once();
         let pins = views_at_batch(&unique_keys);
         let mut resolved_bufs: Vec<Option<quick::ResolvedBuffer>> =
-            Vec::with_capacity(if use_quick { unique_keys.len() } else { 0 });
+            Vec::with_capacity(if QUICK { unique_keys.len() } else { 0 });
         let mut defer: Vec<bool> = Vec::with_capacity(unique_keys.len());
         let mut is_tex: Vec<bool> = Vec::with_capacity(unique_keys.len());
         let mut strides: Vec<u32> = Vec::with_capacity(unique_keys.len());
         for pin in &pins {
             if let Some(view) = pin.as_deref() {
-                if use_quick && let Some(resolved_buf) = quick::resolve(view) {
+                if QUICK && let Some(resolved_buf) = quick::resolve(view) {
                     strides.push(resolved_buf.stride);
                     defer.push(false);
                     is_tex.push(false);
                     resolved_bufs.push(Some(resolved_buf));
                     continue;
                 }
-                if use_quick {
+                if QUICK {
                     resolved_bufs.push(None);
                 }
                 let later = defer_placed(view, at_once);
@@ -1840,7 +1859,7 @@ impl HostHeap {
                 is_tex.push(is_texture(view));
                 strides.push(view_stride(view) | view_kind(view));
             } else {
-                if use_quick {
+                if QUICK {
                     resolved_bufs.push(None);
                 }
                 defer.push(false);
@@ -1850,7 +1869,7 @@ impl HostHeap {
         }
 
         #[cfg(test)]
-        if use_quick {
+        if QUICK {
             quick::run_topology_hook(false);
         }
         lap(S::PrepareUs, &mut clock);
@@ -1987,7 +2006,7 @@ impl HostHeap {
                         kept_updates.push((index, None));
                         if !self.sampler {
                             viewed_updates
-                                .push((index, crate::bindless::BatchUpdate::Resolved(None)));
+                                .push((index, crate::bindless::BatchUpdate::Clear));
                         }
                         finalize.push((index, 0, 0));
                     }
@@ -2162,7 +2181,7 @@ impl HostHeap {
                         viewed_updates.push((
                             index,
                             crate::bindless::BatchUpdate::Quick(
-                                resolved_buf.seen.clone(),
+                                &resolved_buf.seen,
                                 resolved_buf.epoch,
                             ),
                         ));
@@ -2223,13 +2242,13 @@ impl HostHeap {
             lap(S::KeepUs, &mut clock);
             if !self.sampler {
                 #[cfg(test)]
-                if use_quick {
+                if QUICK {
                     quick::run_topology_hook(true);
                 }
                 let retry_start = again.len();
-                self.viewed.set_batch_resolved(&viewed_updates, &mut again);
+                self.viewed.set_batch_resolved::<QUICK>(&viewed_updates, &mut again);
                 let mut retry = again[retry_start..].iter().copied().peekable();
-                if retry.peek().is_some() {
+                if QUICK && retry.peek().is_some() {
                     finalize.retain(|&(index, _, _)| {
                         if retry.peek() == Some(&index) {
                             retry.next();
@@ -2246,7 +2265,7 @@ impl HostHeap {
                 }
             }
             #[cfg(test)]
-            if use_quick {
+            if QUICK {
                 sync_acceptance::note_publication(&viewed_updates, &finalize);
             }
             lap(S::ViewedUs, &mut clock);
